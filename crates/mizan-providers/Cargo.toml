@@ -1,0 +1,12 @@
+[package]
+name = "mizan-providers"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+mizan-core = { path = "../mizan-core" }
+serde.workspace = true

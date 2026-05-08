@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Security Policy
+    url: https://github.com/pendig/mizan/security/policy
+    about: Please do not report credentials, exploits, or private user data in public issues.

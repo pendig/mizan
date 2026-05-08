@@ -1,0 +1,37 @@
+name: Feature Request
+description: Propose a scoped improvement for Mizan.
+title: "feat: "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What use case or limitation does this address?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: What should Mizan do?
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Gateway
+        - Providers
+        - Auth and API keys
+        - Usage metering
+        - Credit ledger
+        - Limits
+        - Observability
+        - Documentation
+        - Other
+  - type: textarea
+    id: notes
+    attributes:
+      label: Additional Context

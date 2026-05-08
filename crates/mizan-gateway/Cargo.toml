@@ -1,0 +1,15 @@
+[package]
+name = "mizan-gateway"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+mizan-core = { path = "../mizan-core" }
+mizan-limits = { path = "../mizan-limits" }
+mizan-metering = { path = "../mizan-metering" }
+mizan-providers = { path = "../mizan-providers" }
+mizan-wallet = { path = "../mizan-wallet" }
+serde.workspace = true

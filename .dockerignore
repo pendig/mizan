@@ -1,0 +1,8 @@
+target/
+.git/
+.env
+.env.*
+!.env.example
+docs/*.swp
+docs/.*.swp
+CONTEXT.md

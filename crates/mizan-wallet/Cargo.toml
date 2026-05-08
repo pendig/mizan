@@ -1,0 +1,12 @@
+[package]
+name = "mizan-wallet"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+mizan-core = { path = "../mizan-core" }
+mizan-metering = { path = "../mizan-metering" }
+serde.workspace = true

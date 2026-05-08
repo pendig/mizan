@@ -1,0 +1,45 @@
+name: Bug Report
+description: Report a reproducible bug in Mizan.
+title: "bug: "
+labels: ["bug"]
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What happened?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Reproduction Steps
+      description: List the shortest steps that reproduce the issue.
+      placeholder: |
+        1. Run ...
+        2. Call ...
+        3. See ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected Behavior
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      placeholder: |
+        OS:
+        Rust:
+        Mizan version/commit:
+        Database:
+        Redis:
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Redact credentials, API keys, prompts, and private data.
+      render: text

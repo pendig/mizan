@@ -1,0 +1,24 @@
+# Local AI-agent context. Keep this out of the open-source repo.
+CONTEXT.md
+
+# Editor swap files
+*.swp
+*.swo
+.*.swp
+.*.swo
+
+# Build outputs
+target/
+dist/
+build/
+
+# Environment and local runtime files
+.env
+.env.*
+!.env.example
+*.log
+
+# OS/editor noise
+.DS_Store
+.idea/
+.vscode/
