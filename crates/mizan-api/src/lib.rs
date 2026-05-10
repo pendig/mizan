@@ -2,7 +2,7 @@ use axum::{
     Json, Router,
     extract::State,
     http::StatusCode,
-    middleware::from_fn_with_state,
+    middleware::{from_fn, from_fn_with_state},
     response::IntoResponse,
     routing::{delete, get, post},
 };
@@ -17,7 +17,10 @@ use tower_http::trace::TraceLayer;
 use tracing::{info, warn};
 
 mod auth;
+mod gateway;
+mod providers;
 mod storage;
+mod utils;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -148,7 +151,36 @@ pub fn router(state: AppState) -> Router {
 
     let api_key_router = Router::new()
         .route("/v1/ping", get(auth::api_key_ping))
+        .route("/v1/chat/completions", post(gateway::chat_completions))
         .route_layer(from_fn_with_state(state.clone(), auth::api_key_auth));
+
+    let public_models_router = Router::new()
+        .route("/v1/models", get(providers::list_models))
+        .route_layer(from_fn_with_state(state.clone(), auth::api_key_auth));
+
+    let provider_admin_router = Router::new()
+        .route(
+            "/admin/provider-connections",
+            get(providers::list_provider_connections).post(providers::create_provider_connection),
+        )
+        .route(
+            "/admin/provider-connections/{id}",
+            delete(providers::delete_provider_connection),
+        )
+        .route(
+            "/admin/model-routes",
+            get(providers::list_model_routes).post(providers::create_model_route),
+        )
+        .route(
+            "/admin/model-routes/{id}",
+            delete(providers::delete_model_route),
+        )
+        .route_layer(from_fn(providers::require_admin_role))
+        .route_layer(from_fn_with_state(state.clone(), auth::api_key_auth));
+
+    let provider_router = Router::new()
+        .merge(public_models_router)
+        .merge(provider_admin_router);
 
     Router::new()
         .route("/healthz", get(healthz))
@@ -156,6 +188,7 @@ pub fn router(state: AppState) -> Router {
         .merge(public_auth_router)
         .merge(session_router)
         .merge(api_key_router)
+        .merge(provider_router)
         .fallback(not_found)
         .layer(TraceLayer::new_for_http())
         .with_state(state)
