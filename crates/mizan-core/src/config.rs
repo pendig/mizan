@@ -106,7 +106,7 @@ fn normalize_sqlite_url(database_url: String) -> AppResult<String> {
     let path_part = parts.next().unwrap_or_default();
     let query_part = parts.next();
 
-    if path_part == ":memory:" {
+    if path_part == ":memory:" || path_part == "file::memory:" {
         return Ok(database_url);
     }
 
@@ -200,6 +200,18 @@ mod tests {
         assert!(normalized.starts_with("sqlite://"));
         assert!(normalized.contains("?mode=rwc"));
         assert!(normalized.ends_with("data/legacy.sqlite3?mode=rwc"));
+    }
+
+    #[test]
+    fn preserves_sqlite_memory_urls_during_normalization() {
+        let with_legacy =
+            normalize_sqlite_url("sqlite:file::memory:?cache=shared".to_string()).expect("normalize");
+        assert_eq!(with_legacy, "sqlite:file::memory:?cache=shared");
+
+        let with_double_slash =
+            normalize_sqlite_url("sqlite://file::memory:?cache=shared".to_string())
+                .expect("normalize");
+        assert_eq!(with_double_slash, "sqlite://file::memory:?cache=shared");
     }
 
     #[test]
