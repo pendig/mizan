@@ -4,13 +4,17 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::middleware::Next;
 use axum::response::Response;
-use mizan_core::{AppError, AppResult, DatabaseBackend, ErrorEnvelope};
+use mizan_core::{AppError, ErrorEnvelope};
 use serde::{Deserialize, Serialize};
 use sqlx::{query, query_as};
 use uuid::Uuid;
 
 use crate::AppState;
 use crate::auth::ApiKeyIdentity;
+use crate::utils::{
+    encrypt_provider_api_key, from_app_error, is_enabled, is_unique_constraint_error,
+    parse_timestamp, prepare_sql, unix_timestamp_string,
+};
 
 type ProviderHttpResult<T> = Result<T, (StatusCode, Json<ErrorEnvelope>)>;
 
@@ -119,10 +123,18 @@ pub struct PublicModelsResponse {
 }
 
 pub async fn require_admin_role(
-    axum::Extension(identity): axum::Extension<ApiKeyIdentity>,
+    identity: Option<axum::Extension<ApiKeyIdentity>>,
     request: axum::http::Request<Body>,
     next: Next,
 ) -> ProviderHttpResult<Response> {
+    let identity = identity.ok_or_else(|| {
+        (
+            StatusCode::UNAUTHORIZED,
+            Json(ErrorEnvelope::from(&AppError::Unauthorized)),
+        )
+    })?;
+    let identity = identity.0;
+
     if identity.user_role != "admin" {
         return Err((
             StatusCode::FORBIDDEN,
@@ -145,13 +157,15 @@ pub async fn list_models(
                     pc.name,
                     pc.provider_type,
                     mr.max_tokens,
-                    mr.created_at
+             mr.created_at
              FROM model_routes mr
              INNER JOIN provider_connections pc
                ON pc.id = mr.provider_connection_id
-             WHERE mr.enabled = 1 AND pc.enabled = 1
+             WHERE mr.enabled = ? AND pc.enabled = ?
              ORDER BY mr.public_model ASC",
         ))
+        .bind(1)
+        .bind(1)
         .fetch_all(&state.database)
         .await
         .map_err(|error| from_app_error(AppError::infrastructure(error.to_string())))?;
@@ -168,7 +182,7 @@ pub async fn list_models(
         created_at,
     ) in rows
     {
-        let created = parse_timestamp(&created_at).map_err(|error| from_app_error(error))?;
+        let created = parse_timestamp(&created_at).map_err(from_app_error)?;
 
         data.push(PublicModelResponse {
             id: public_model.clone(),
@@ -279,6 +293,14 @@ pub async fn create_provider_connection(
     let id = Uuid::now_v7();
     let now = unix_timestamp_string();
     let enabled = payload.enabled.unwrap_or(true);
+    let provider_secret_key = state.config.provider_secret_key.as_deref().ok_or_else(|| {
+        from_app_error(AppError::invalid_config(
+            "MIZAN_PROVIDER_SECRET_KEY",
+            "set MIZAN_PROVIDER_SECRET_KEY before creating provider connections",
+        ))
+    })?;
+    let encrypted_api_key = encrypt_provider_api_key(provider_secret_key, &id.to_string(), secret)
+        .map_err(from_app_error)?;
 
     let sql = prepare_sql(
         state.database_backend(),
@@ -292,7 +314,7 @@ pub async fn create_provider_connection(
         .bind(name)
         .bind(provider_type)
         .bind(base_url)
-        .bind(secret)
+        .bind(encrypted_api_key)
         .bind(if enabled { 1 } else { 0 })
         .bind(&now)
         .bind(&now)
@@ -445,25 +467,50 @@ pub async fn create_model_route(
         ));
     }
 
-    if let Some(max_tokens) = payload.max_tokens {
-        if max_tokens < 0 {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                Json(ErrorEnvelope::from(&AppError::invalid_config(
-                    "model_route.max_tokens",
-                    "max_tokens cannot be negative",
-                ))),
-            ));
-        }
+    if let Some(max_tokens) = payload.max_tokens
+        && max_tokens < 0
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorEnvelope::from(&AppError::invalid_config(
+                "model_route.max_tokens",
+                "max_tokens cannot be negative",
+            ))),
+        ));
+    }
+
+    if let Some(pricing_input_per_1m_tokens) = payload.pricing_input_per_1m_tokens
+        && pricing_input_per_1m_tokens < 0
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorEnvelope::from(&AppError::invalid_config(
+                "model_route.pricing_input_per_1m_tokens",
+                "pricing_input_per_1m_tokens cannot be negative",
+            ))),
+        ));
+    }
+
+    if let Some(pricing_output_per_1m_tokens) = payload.pricing_output_per_1m_tokens
+        && pricing_output_per_1m_tokens < 0
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorEnvelope::from(&AppError::invalid_config(
+                "model_route.pricing_output_per_1m_tokens",
+                "pricing_output_per_1m_tokens cannot be negative",
+            ))),
+        ));
     }
 
     let provider_connection_id = payload.provider_connection_id;
 
     let provider_exists = query_as::<_, (i64,)>(&prepare_sql(
         state.database_backend(),
-        "SELECT 1 FROM provider_connections WHERE id = ?",
+        "SELECT 1 FROM provider_connections WHERE id = ? AND enabled = ?",
     ))
     .bind(provider_connection_id.to_string())
+    .bind(1)
     .fetch_optional(&state.database)
     .await
     .map_err(|error| from_app_error(AppError::infrastructure(error.to_string())))?;
@@ -564,96 +611,5 @@ fn map_duplicate_model_error(error: String) -> AppError {
         AppError::invalid_config("model_route.public_model", "public_model must be unique")
     } else {
         AppError::infrastructure(error)
-    }
-}
-
-fn from_app_error(error: AppError) -> (StatusCode, Json<ErrorEnvelope>) {
-    let status = match error {
-        AppError::InvalidConfig { .. } => StatusCode::BAD_REQUEST,
-        AppError::NotFound(_) => StatusCode::NOT_FOUND,
-        AppError::Unauthorized => StatusCode::UNAUTHORIZED,
-        AppError::Forbidden => StatusCode::FORBIDDEN,
-        _ => StatusCode::INTERNAL_SERVER_ERROR,
-    };
-
-    (status, Json(ErrorEnvelope::from(&error)))
-}
-
-fn is_enabled(raw: i64) -> bool {
-    raw != 0
-}
-
-fn parse_timestamp(raw: &str) -> AppResult<i64> {
-    raw.parse::<i64>()
-        .map_err(|error| AppError::infrastructure(format!("invalid timestamp: {error}")))
-}
-
-fn prepare_sql(database_backend: DatabaseBackend, query: &'static str) -> String {
-    match database_backend {
-        DatabaseBackend::Sqlite => query.to_string(),
-        DatabaseBackend::Postgres => to_dollar_params(query),
-    }
-}
-
-fn to_dollar_params(query: &str) -> String {
-    let mut parameter_index = 0usize;
-    let mut converted = String::with_capacity(query.len());
-
-    for character in query.chars() {
-        if character == '?' {
-            parameter_index += 1;
-            converted.push('$');
-            converted.push_str(&parameter_index.to_string());
-            continue;
-        }
-
-        converted.push(character);
-    }
-
-    converted
-}
-
-fn is_unique_constraint_error(message: &str) -> bool {
-    let normalized = message.to_lowercase();
-    normalized.contains("unique")
-        && (normalized.contains("constraint") || normalized.contains("already exists"))
-}
-
-fn unix_timestamp_string() -> String {
-    now_utc_epoch_seconds().to_string()
-}
-
-fn now_utc_epoch_seconds() -> i64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system time")
-        .as_secs() as i64
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn prepare_sql_keeps_question_marks_for_sqlite() {
-        let prepared = prepare_sql(DatabaseBackend::Sqlite, "SELECT * FROM x WHERE id = ?");
-        assert_eq!(prepared, "SELECT * FROM x WHERE id = ?");
-    }
-
-    #[test]
-    fn prepare_sql_converts_question_marks_for_postgres() {
-        let prepared = prepare_sql(
-            DatabaseBackend::Postgres,
-            "SELECT * FROM x WHERE a = ? AND b = ?",
-        );
-        assert_eq!(prepared, "SELECT * FROM x WHERE a = $1 AND b = $2");
-    }
-
-    #[test]
-    fn unix_timestamp_string_is_numeric() {
-        let timestamp = unix_timestamp_string();
-        assert!(timestamp.parse::<i64>().is_ok());
     }
 }

@@ -16,6 +16,7 @@ connection as sensitive.
 - Hash virtual API keys.
 - Hash user passwords.
 - Encrypt provider secrets at rest.
+- Store `MIZAN_PROVIDER_SECRET_KEY` securely and rotate it on compromise.
 - Never return provider credentials from APIs.
 - Disable raw prompt/response logging by default.
 - Audit admin changes to providers, model routes, pricing, and credits.

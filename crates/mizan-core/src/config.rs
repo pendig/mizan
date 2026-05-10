@@ -14,6 +14,7 @@ pub struct AppConfig {
     pub admin_seed_email: Option<String>,
     pub admin_seed_password: Option<String>,
     pub admin_seed_role: String,
+    pub provider_secret_key: Option<String>,
 }
 
 impl AppConfig {
@@ -49,6 +50,10 @@ impl AppConfig {
         } else {
             admin_seed_role
         };
+        let provider_secret_key = env::var("MIZAN_PROVIDER_SECRET_KEY")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
 
         if matches!(
             (admin_seed_email.as_deref(), admin_seed_password.as_deref()),
@@ -80,6 +85,7 @@ impl AppConfig {
                 admin_seed_email,
                 admin_seed_password,
                 admin_seed_role,
+                provider_secret_key,
             })
         } else {
             Err(AppError::invalid_config(

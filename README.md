@@ -107,6 +107,13 @@ cargo check --workspace
 cargo test --workspace
 ```
 
+Environment variables:
+
+- `MIZAN_PROVIDER_SECRET_KEY` (required before creating provider connections, used to encrypt provider API keys at rest)
+- `MIZAN_HTTP_ADDR` (default `0.0.0.0:18180`)
+- `MIZAN_DATABASE_URL`, `MIZAN_DB_MAX_CONNECTIONS`, `MIZAN_RUN_MIGRATIONS` for storage
+- `MIZAN_ADMIN_EMAIL`, `MIZAN_ADMIN_PASSWORD`, `MIZAN_ADMIN_ROLE` for optional bootstrap
+
 Run the API locally:
 
 ```sh

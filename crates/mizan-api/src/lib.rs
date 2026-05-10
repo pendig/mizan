@@ -20,6 +20,7 @@ mod auth;
 mod gateway;
 mod providers;
 mod storage;
+mod utils;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -174,8 +175,8 @@ pub fn router(state: AppState) -> Router {
             "/admin/model-routes/{id}",
             delete(providers::delete_model_route),
         )
-        .route_layer(from_fn_with_state(state.clone(), auth::api_key_auth))
-        .route_layer(from_fn(providers::require_admin_role));
+        .route_layer(from_fn(providers::require_admin_role))
+        .route_layer(from_fn_with_state(state.clone(), auth::api_key_auth));
 
     let provider_router = Router::new()
         .merge(public_models_router)

@@ -1,5 +1,7 @@
-use std::time::{SystemTime, UNIX_EPOCH};
-
+use crate::utils::{
+    from_app_error, is_unique_constraint_error, now_utc_epoch_seconds, prepare_sql,
+    unix_timestamp_string,
+};
 use axum::{
     Extension, Json,
     body::Body,
@@ -721,44 +723,8 @@ fn session_token_from_headers(headers: &HeaderMap) -> Option<&str> {
         })
 }
 
-fn prepare_sql(database_backend: DatabaseBackend, query: &'static str) -> String {
-    match database_backend {
-        DatabaseBackend::Sqlite => query.to_string(),
-        DatabaseBackend::Postgres => to_dollar_params(query),
-    }
-}
-
-fn to_dollar_params(query: &str) -> String {
-    let mut parameter_index = 0usize;
-    let mut converted = String::with_capacity(query.len());
-
-    for character in query.chars() {
-        if character == '?' {
-            parameter_index += 1;
-            converted.push('$');
-            converted.push_str(&parameter_index.to_string());
-            continue;
-        }
-
-        converted.push(character);
-    }
-
-    converted
-}
-
 fn map_error(status: StatusCode, error: AppError) -> (StatusCode, Json<ErrorEnvelope>) {
     (status, Json(ErrorEnvelope::from(&error)))
-}
-
-fn from_app_error(error: AppError) -> (StatusCode, Json<ErrorEnvelope>) {
-    let status = match error {
-        AppError::InvalidConfig { .. } => StatusCode::BAD_REQUEST,
-        AppError::NotFound(_) => StatusCode::NOT_FOUND,
-        AppError::Unauthorized => StatusCode::UNAUTHORIZED,
-        AppError::Forbidden => StatusCode::FORBIDDEN,
-        _ => StatusCode::INTERNAL_SERVER_ERROR,
-    };
-    map_error(status, error)
 }
 
 fn hash_value(value: &str) -> String {
@@ -771,24 +737,8 @@ fn hash_value(value: &str) -> String {
         .collect::<String>()
 }
 
-fn now_utc_epoch_seconds() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |duration| duration.as_secs() as i64)
-}
-
-fn unix_timestamp_string() -> String {
-    now_utc_epoch_seconds().to_string()
-}
-
 fn normalize_email(email: &str) -> String {
     email.trim().to_lowercase()
-}
-
-fn is_unique_constraint_error(message: &str) -> bool {
-    message.contains("already exists")
-        || message.contains("UNIQUE constraint failed")
-        || message.contains("duplicate key")
 }
 
 struct SessionRecord {
@@ -811,24 +761,6 @@ mod tests {
     #[test]
     fn normalize_email_is_lowercase_and_trimmed() {
         assert_eq!(normalize_email("  User@Example.COM "), "user@example.com");
-    }
-
-    #[test]
-    fn prepare_sql_keeps_question_marks_for_sqlite() {
-        let prepared = prepare_sql(
-            DatabaseBackend::Sqlite,
-            "SELECT id FROM users WHERE id = ? AND role = ?",
-        );
-        assert_eq!(prepared, "SELECT id FROM users WHERE id = ? AND role = ?");
-    }
-
-    #[test]
-    fn prepare_sql_converts_question_marks_for_postgres() {
-        let prepared = prepare_sql(
-            DatabaseBackend::Postgres,
-            "SELECT id FROM users WHERE id = ? AND role = ?",
-        );
-        assert_eq!(prepared, "SELECT id FROM users WHERE id = $1 AND role = $2");
     }
 
     #[test]

@@ -122,7 +122,7 @@ Crates:
 Tasks:
 
 - [x] Admin provider CRUD (`/admin/provider-connections`, `/admin/provider-connections/{id}`).
-- [ ] Encrypt provider secrets before storage (next milestone task).
+- [x] Encrypt provider secrets before storage.
 - [x] Admin model route CRUD (`/admin/model-routes`, `/admin/model-routes/{id}`).
 - [x] Public model route resolver and user-visible `GET /v1/models`.
 - [x] Provider adapters remain isolated from route handlers.
