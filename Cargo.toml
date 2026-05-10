@@ -23,9 +23,11 @@ rust-version = "1.95"
 async-trait = "0.1"
 axum = "0.8"
 redis = "0.32"
+sha2 = "0.10.8"
+bcrypt = "0.15"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "postgres", "uuid", "time", "json"] }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "macros", "any", "postgres", "sqlite", "uuid", "time", "json", "migrate"] }
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "net"] }
 tower-http = { version = "0.6", features = ["trace"] }

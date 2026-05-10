@@ -7,7 +7,9 @@ pub struct RequestContext {
     pub trace_id: Uuid,
     pub user_id: Option<Uuid>,
     pub api_key_id: Option<Uuid>,
+    pub provider: Option<String>,
     pub provider_id: Option<Uuid>,
+    pub route: Option<String>,
     pub route_id: Option<Uuid>,
     pub model: Option<String>,
     pub streaming: bool,
@@ -22,7 +24,9 @@ impl RequestContext {
             trace_id: request_id,
             user_id: None,
             api_key_id: None,
+            provider: None,
             provider_id: None,
+            route: None,
             route_id: None,
             model: None,
             streaming: false,
@@ -56,8 +60,18 @@ impl RequestContextBuilder {
         self
     }
 
+    pub fn provider(mut self, provider: impl Into<String>) -> Self {
+        self.context.provider = Some(provider.into());
+        self
+    }
+
     pub fn provider_id(mut self, provider_id: Uuid) -> Self {
         self.context.provider_id = Some(provider_id);
+        self
+    }
+
+    pub fn route(mut self, route: impl Into<String>) -> Self {
+        self.context.route = Some(route.into());
         self
     }
 

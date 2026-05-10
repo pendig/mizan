@@ -1,6 +1,7 @@
 # Backend Implementation Plan
 
-This is the first coding plan for the MVP. It assumes Rust, PostgreSQL, Redis,
+This is the first coding plan for the MVP. It assumes Rust, SQLite (phase 0-1),
+PostgreSQL-ready design, Redis,
 and RTK as the starting base for the CLI proxy/token-saving layer.
 
 ## Implementation Rules
@@ -36,15 +37,15 @@ Tasks:
 - Add centralized structured logging and trace span initialization.
 - Add `axum` HTTP server with graceful shutdown.
 - Add `/healthz`.
-- Add PostgreSQL pool through `sqlx`.
+- Add SQLX pool through `sqlx` (SQLite default, PostgreSQL ready).
 - Add Redis client.
 - Add first migration runner.
 - Add Docker Compose.
 
 Acceptance:
 
-- `docker compose up` starts all services.
-- `curl localhost:8080/healthz` returns healthy status.
+- `docker compose up` starts all default services.
+- `curl localhost:18180/healthz` returns healthy status.
 - `mizan-rtk` exposes the RTK-backed command filtering/proxy functions for
   later gateway and CLI integration.
 - Shared request context and error types are available to all crates.
@@ -236,7 +237,7 @@ Suggested issue order:
 
 1. Bootstrap Rust workspace and bring in RTK as `mizan-rtk`.
 2. Add Docker Compose and health endpoint.
-3. Add PostgreSQL migrations and migration runner.
+3. Add migration runner and initial migrations for the phase-1 schema.
 4. Add Redis client and config.
 5. Implement user auth and admin seed.
 6. Implement virtual API keys.

@@ -13,6 +13,9 @@ pub enum AppError {
         source: Box<dyn StdError + Send + Sync>,
     },
 
+    #[error("invalid configuration for {key}: {message}")]
+    InvalidConfig { key: &'static str, message: String },
+
     #[error("infrastructure error: {0}")]
     Infrastructure(String),
 
@@ -46,6 +49,13 @@ impl AppError {
         }
     }
 
+    pub fn invalid_config(key: &'static str, message: impl Into<String>) -> Self {
+        Self::InvalidConfig {
+            key,
+            message: message.into(),
+        }
+    }
+
     pub fn infrastructure(message: impl fmt::Display) -> Self {
         Self::Infrastructure(message.to_string())
     }
@@ -57,6 +67,7 @@ impl AppError {
     pub fn public_code(&self) -> &'static str {
         match self {
             Self::Config { .. } => "configuration_error",
+            Self::InvalidConfig { .. } => "invalid_configuration",
             Self::Infrastructure(_) => "infrastructure_error",
             Self::Io(_) => "io_error",
             Self::NotFound(_) => "not_found",

@@ -11,6 +11,9 @@ CONTEXT.md
 target/
 dist/
 build/
+data/
+*.sqlite
+*.sqlite3
 
 # Environment and local runtime files
 .env

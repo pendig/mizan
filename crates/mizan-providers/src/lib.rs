@@ -37,6 +37,21 @@ pub struct TokenUsage {
     pub estimated: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProviderHealth {
+    pub status: &'static str,
+    pub latency_ms: Option<u64>,
+}
+
+impl Default for ProviderHealth {
+    fn default() -> Self {
+        Self {
+            status: "unknown",
+            latency_ms: None,
+        }
+    }
+}
+
 #[async_trait]
 pub trait ProviderAdapter: Send + Sync {
     fn name(&self) -> &'static str;
@@ -48,6 +63,10 @@ pub trait ProviderAdapter: Send + Sync {
     ) -> AppResult<ChatResponse>;
 
     async fn models(&self, context: &RequestContext) -> AppResult<Vec<ProviderModel>>;
+
+    async fn health(&self, _context: &RequestContext) -> AppResult<ProviderHealth> {
+        Ok(ProviderHealth::default())
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -82,5 +101,12 @@ impl ProviderAdapter for OpenAiCompatibleProvider {
 
     async fn models(&self, _context: &RequestContext) -> AppResult<Vec<ProviderModel>> {
         Ok(Vec::new())
+    }
+
+    async fn health(&self, _context: &RequestContext) -> AppResult<ProviderHealth> {
+        Ok(ProviderHealth {
+            status: "ok",
+            latency_ms: None,
+        })
     }
 }

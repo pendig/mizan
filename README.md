@@ -52,13 +52,14 @@ the CLI proxy and token-saving layer. Do not rebuild command rewriting,
 command-output filtering, or CLI token-saving from scratch. Mizan should wrap,
 adapt, or vendor the RTK layer, then build gateway, metering, wallet, and admin
 APIs around it. Use Redis for fast runtime controls and PostgreSQL for
-source-of-truth records.
+source-of-truth records. We run SQLite by default for phase-0/1 and keep
+PostgreSQL in the migration model for future production deployment.
 
 Recommended Rust stack:
 
 - `tokio` for async runtime
 - `axum` for HTTP APIs and streaming gateway routes
-- `sqlx` for PostgreSQL
+- `sqlx` for SQLite and PostgreSQL
 - `redis` or `deadpool-redis` for runtime counters and leases
 - `tower` middleware for auth, tracing, timeouts, and limits
 - RTK-derived `mizan-rtk` module for CLI proxying and command-output filtering
@@ -74,7 +75,7 @@ flowchart LR
     Router --> Provider["Provider or local model"]
     Provider --> Meter["Usage meter"]
     Meter --> Wallet["Credit ledger"]
-    Wallet --> DB["PostgreSQL"]
+    Wallet --> DB["SQLite (default) / PostgreSQL"]
 ```
 
 ## Core Provides
@@ -111,7 +112,7 @@ Run the API locally:
 cargo run -p mizan-api
 ```
 
-Run API, PostgreSQL, and Redis with Docker Compose:
+Run API, SQLite-backed storage, and Redis with Docker Compose:
 
 ```sh
 docker compose up --build
