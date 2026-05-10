@@ -110,9 +110,19 @@ CREATE TABLE IF NOT EXISTS admin_audit_logs (
 );
 
 CREATE INDEX IF NOT EXISTS idx_api_keys_user_id ON api_keys (user_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_wallets_owner_user_id ON wallets (owner_user_id);
+CREATE INDEX IF NOT EXISTS idx_api_keys_key_hash ON api_keys (key_hash);
 CREATE INDEX IF NOT EXISTS idx_usage_events_user_id_created_at ON usage_events (user_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_usage_events_api_key_id_created_at ON usage_events (api_key_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_usage_events_model_created_at ON usage_events (model, created_at);
+CREATE INDEX IF NOT EXISTS idx_usage_events_provider_id_created_at ON usage_events (provider_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_usage_events_route_id_created_at ON usage_events (route_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_credit_ledger_wallet_created_at ON credit_ledger (wallet_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_request_logs_user_id_created_at ON request_logs (user_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_request_logs_api_key_id_created_at ON request_logs (api_key_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_request_logs_provider_id_created_at ON request_logs (provider_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_request_logs_route_id_created_at ON request_logs (route_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_admin_audit_actor_user_id_created_at ON admin_audit_logs (actor_user_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_admin_audit_entity_type_created_at ON admin_audit_logs (entity_type, created_at);
 CREATE INDEX IF NOT EXISTS idx_provider_connections_enabled ON provider_connections (enabled);
 CREATE INDEX IF NOT EXISTS idx_model_routes_public_model ON model_routes (public_model);
