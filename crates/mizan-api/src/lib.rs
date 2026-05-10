@@ -17,6 +17,7 @@ use tower_http::trace::TraceLayer;
 use tracing::{info, warn};
 
 mod auth;
+mod gateway;
 mod providers;
 mod storage;
 
@@ -149,6 +150,7 @@ pub fn router(state: AppState) -> Router {
 
     let api_key_router = Router::new()
         .route("/v1/ping", get(auth::api_key_ping))
+        .route("/v1/chat/completions", post(gateway::chat_completions))
         .route_layer(from_fn_with_state(state.clone(), auth::api_key_auth));
 
     let public_models_router = Router::new()

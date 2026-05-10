@@ -937,6 +937,7 @@ dependencies = [
  "bcrypt",
  "mizan-core",
  "mizan-gateway",
+ "mizan-providers",
  "redis",
  "serde",
  "sha2",

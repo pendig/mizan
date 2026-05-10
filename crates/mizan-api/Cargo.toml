@@ -11,6 +11,7 @@ axum.workspace = true
 bcrypt.workspace = true
 mizan-core = { path = "../mizan-core" }
 mizan-gateway = { path = "../mizan-gateway" }
+mizan-providers = { path = "../mizan-providers" }
 redis.workspace = true
 sha2.workspace = true
 serde.workspace = true
