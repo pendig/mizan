@@ -1,4 +1,10 @@
-use axum::{Json, Router, extract::State, response::IntoResponse, routing::get};
+use axum::{
+    Json, Router,
+    extract::State,
+    middleware::from_fn_with_state,
+    response::IntoResponse,
+    routing::{delete, get, post},
+};
 use mizan_core::{AppConfig, AppError, AppResult, DatabaseBackend, ErrorEnvelope, init_tracing};
 use mizan_gateway::Gateway;
 use redis::Client as RedisClient;
@@ -8,6 +14,7 @@ use tokio::net::TcpListener;
 use tower_http::trace::TraceLayer;
 use tracing::{error, info};
 
+mod auth;
 mod storage;
 
 #[derive(Clone)]
@@ -26,12 +33,27 @@ impl AppState {
         let redis = RedisClient::open(config.redis_url.as_str())
             .map_err(|err| AppError::infrastructure(err.to_string()))?;
 
-        Ok(Self {
+        let state = Self {
             config,
             gateway: Gateway::new(),
             database,
             redis,
-        })
+        };
+
+        if let (Some(email), Some(password)) = (
+            state.config.admin_seed_email.as_deref(),
+            state.config.admin_seed_password.as_deref(),
+        ) {
+            auth::ensure_admin_seed(
+                &state.database,
+                email,
+                password,
+                &state.config.admin_seed_role,
+            )
+            .await?;
+        }
+
+        Ok(state)
     }
 
     pub async fn check_database(&self) -> bool {
@@ -77,9 +99,28 @@ pub async fn run_from_env() -> AppResult<()> {
 }
 
 pub fn router(state: AppState) -> Router {
+    let public_auth_router = Router::new()
+        .route("/auth/register", post(auth::register))
+        .route("/auth/login", post(auth::login));
+
+    let session_router = Router::new()
+        .route("/me", get(auth::me))
+        .route(
+            "/api-keys",
+            post(auth::create_api_key).get(auth::list_api_keys),
+        )
+        .route("/api-keys/{id}", delete(auth::revoke_api_key));
+
+    let api_key_router = Router::new()
+        .route("/v1/ping", get(auth::api_key_ping))
+        .route_layer(from_fn_with_state(state.clone(), auth::api_key_auth));
+
     Router::new()
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
+        .merge(public_auth_router)
+        .merge(session_router)
+        .merge(api_key_router)
         .fallback(not_found)
         .layer(TraceLayer::new_for_http())
         .with_state(state)

@@ -10,6 +10,9 @@ pub struct AppConfig {
     pub run_migrations: bool,
     pub redis_url: String,
     pub log_level: String,
+    pub admin_seed_email: Option<String>,
+    pub admin_seed_password: Option<String>,
+    pub admin_seed_role: String,
 }
 
 impl AppConfig {
@@ -28,19 +31,50 @@ impl AppConfig {
         });
         let database_url = normalize_sqlite_url(database_url)?;
 
-        Ok(Self {
-            http_addr,
-            database_backend: DatabaseBackend::from_url(&database_url)?,
-            database_url,
-            run_migrations: env::var("MIZAN_RUN_MIGRATIONS")
-                .unwrap_or_else(|_| "true".to_owned())
-                .parse()
-                .unwrap_or(true),
-            redis_url: env::var("REDIS_URL")
-                .unwrap_or_else(|_| "redis://127.0.0.1:6379/".to_owned()),
-            log_level: env::var("RUST_LOG")
-                .unwrap_or_else(|_| "mizan=info,tower_http=info".to_owned()),
-        })
+        let admin_seed_email = env::var("MIZAN_ADMIN_EMAIL")
+            .ok()
+            .map(|value| value.trim().to_lowercase())
+            .filter(|value| !value.is_empty());
+        let admin_seed_password = env::var("MIZAN_ADMIN_PASSWORD")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        let admin_seed_role = env::var("MIZAN_ADMIN_ROLE")
+            .unwrap_or_else(|_| "admin".to_owned())
+            .trim()
+            .to_lowercase();
+        let admin_seed_role = if admin_seed_role.is_empty() {
+            "admin".to_owned()
+        } else {
+            admin_seed_role
+        };
+
+        if matches!(
+            (admin_seed_email.as_deref(), admin_seed_password.as_deref()),
+            (Some(_), Some(_)) | (None, None)
+        ) {
+            Ok(Self {
+                http_addr,
+                database_backend: DatabaseBackend::from_url(&database_url)?,
+                database_url,
+                run_migrations: env::var("MIZAN_RUN_MIGRATIONS")
+                    .unwrap_or_else(|_| "true".to_owned())
+                    .parse()
+                    .unwrap_or(true),
+                redis_url: env::var("REDIS_URL")
+                    .unwrap_or_else(|_| "redis://127.0.0.1:6379/".to_owned()),
+                log_level: env::var("RUST_LOG")
+                    .unwrap_or_else(|_| "mizan=info,tower_http=info".to_owned()),
+                admin_seed_email,
+                admin_seed_password,
+                admin_seed_role,
+            })
+        } else {
+            Err(AppError::invalid_config(
+                "MIZAN_ADMIN_EMAIL",
+                "set both MIZAN_ADMIN_EMAIL and MIZAN_ADMIN_PASSWORD, or set neither",
+            ))
+        }
     }
 }
 
