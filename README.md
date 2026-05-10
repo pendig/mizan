@@ -13,10 +13,11 @@ runtime limit engine before building a large dashboard.
 
 ## Status
 
-Mizan is in bootstrap stage. The repository now contains product docs and a
-minimal Rust workspace foundation with shared core types, modular crate
-boundaries, a health endpoint, Docker Compose, and placeholder provider, gateway,
-metering, wallet, limit, and RTK modules.
+Mizan is in active bootstrap-to-MVP delivery. Milestone 3 (auth/API keys) and
+Milestone 4 (provider/model management + `GET /v1/models`) are implemented.
+Milestone 5 has a first `POST /v1/chat/completions` route with non-streaming
+flow and model routing in place; streaming, upstream error shaping, and request
+trace propagation are still in-progress.
 
 ## MVP Scope
 

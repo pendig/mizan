@@ -41,6 +41,8 @@ This backlog is ordered for a fast backend-first MVP.
 
 ## Provider Routing
 
+Progress status (current): Milestone 4 done in PR #33 with non-streaming chat proxy follow-up in same PR.
+
 1. Add provider connection CRUD.
 2. Add OpenAI-compatible provider adapter.
 3. Add local OpenAI-compatible provider mode.

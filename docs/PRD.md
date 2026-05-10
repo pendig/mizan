@@ -159,15 +159,18 @@ Admin/user API:
 - `DELETE /api-keys/{id}`
 - `GET /usage`
 - `GET /credits`
-- `POST /admin/providers`
-- `GET /admin/providers`
-- `PATCH /admin/providers/{id}`
+- `POST /admin/provider-connections`
+- `GET /admin/provider-connections`
+- `DELETE /admin/provider-connections/{id}`
 - `POST /admin/model-routes`
 - `GET /admin/model-routes`
-- `PATCH /admin/model-routes/{id}`
+- `DELETE /admin/model-routes/{id}`
 - `POST /admin/users/{id}/credits/grant`
 - `PATCH /admin/users/{id}/credit-policy`
 - `GET /admin/usage`
+
+> Note: `PATCH` endpoints for providers/model routes are currently planned for a
+> later refinement pass; CRUD currently provides `GET`, `POST`, and `DELETE`.
 
 ### Usage Metering
 

@@ -111,6 +111,8 @@ Acceptance:
 
 ## Milestone 4 - Provider and Route Management
 
+Status: ✅ Implemented in current branch and PR #33
+
 Crates:
 
 - `crates/mizan-providers`
@@ -119,21 +121,23 @@ Crates:
 
 Tasks:
 
-- Admin provider CRUD.
-- Encrypt provider secrets before storage.
-- Admin model route CRUD.
-- Public model route resolver.
-- User-visible `/v1/models`.
-- Provider adapters remain isolated from route handlers.
-- Model registry lookups stay separate from provider transport details.
+- [x] Admin provider CRUD (`/admin/provider-connections`, `/admin/provider-connections/{id}`).
+- [ ] Encrypt provider secrets before storage (next milestone task).
+- [x] Admin model route CRUD (`/admin/model-routes`, `/admin/model-routes/{id}`).
+- [x] Public model route resolver and user-visible `GET /v1/models`.
+- [x] Provider adapters remain isolated from route handlers.
+- [x] Model registry lookups stay separate from provider transport details.
 
 Acceptance:
 
 - Admin can add an OpenAI-compatible provider.
 - Admin can map `mizan/smart` to an upstream model.
 - User can list available models with a virtual key.
+- Provider secret encryption remains open and is called out explicitly before phase-6 rollout.
 
 ## Milestone 5 - Chat Completions Gateway
+
+Status: ✅ Non-streaming handler implemented, streaming upstream path still pending
 
 Crates:
 
@@ -142,20 +146,21 @@ Crates:
 
 Tasks:
 
-- Implement `POST /v1/chat/completions`.
-- Implement non-streaming proxy.
-- Implement streaming proxy.
-- Normalize upstream errors.
-- Attach request id to logs and responses.
-- Store request log without raw body by default.
-- Keep provider-specific request transforms in `mizan-providers`.
-- Keep gateway orchestration separate from metering and wallet writes.
+- [x] Implement `POST /v1/chat/completions` route wiring.
+- [x] Implement non-streaming handler path and route resolution.
+- [ ] Implement streaming proxy.
+- [ ] Normalize upstream errors.
+- [ ] Attach request id to logs and responses.
+- [ ] Store request log without raw body by default.
+- [x] Keep provider-specific request transforms in `mizan-providers` contracts.
+- [x] Keep gateway orchestration separate from metering and wallet writes.
 
 Acceptance:
 
 - OpenAI SDK can call the gateway by changing base URL.
-- Streaming and non-streaming calls work.
-- Upstream failure returns a useful OpenAI-compatible error shape.
+- Non-streaming calls work with the current stub response and route resolution.
+- Streaming path will be added in next pass.
+- Upstream failure error shape alignment is tracked in the next pass.
 
 ## Milestone 6 - Usage and Credits
 

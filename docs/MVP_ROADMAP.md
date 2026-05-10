@@ -78,12 +78,13 @@ Exit criteria:
 
 ## Phase 3 - Provider Connections and Model Routes
 
+Status: ✅ Implemented in PR #33
+
 Deliverables:
 
-- Admin provider CRUD.
+- Admin provider CRUD (`/admin/provider-connections`).
 - OpenAI-compatible provider adapter.
-- Local OpenAI-compatible adapter mode.
-- Model route CRUD.
+- Model route CRUD (`/admin/model-routes`).
 - `/v1/models`.
 - Provider modules isolated from gateway handlers.
 
@@ -94,19 +95,21 @@ Exit criteria:
 
 ## Phase 4 - Gateway Proxy
 
+Status: ✅ Partially implemented in PR #33
+
 Deliverables:
 
-- `POST /v1/chat/completions`.
-- Streaming and non-streaming support.
-- Upstream error normalization.
-- Request id propagation.
+- `POST /v1/chat/completions` (non-streaming path implemented).
+- Streaming path (open in next milestone).
+- Upstream error normalization (open in next milestone).
+- Request id propagation (open in next milestone).
 - Basic provider health status.
 - Provider transforms, routing, and gateway orchestration stay separate.
 
 Exit criteria:
 
 - OpenAI SDK can call the gateway by changing only base URL and API key.
-- Streaming works through the gateway.
+- Streaming path works after milestone 5 follow-up.
 
 ## Phase 5 - Usage Metering and Credits
 
