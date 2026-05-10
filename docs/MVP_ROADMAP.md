@@ -45,7 +45,7 @@ Deliverables:
 - Config loader.
 - Shared request context and error types.
 - Structured logging and tracing initialization.
-- PostgreSQL migrations.
+- SQLite-first migrations (with PostgreSQL-compatible schema baseline).
 - Redis connection.
 - Health endpoint.
 - Standard log redaction and field conventions.
@@ -53,7 +53,7 @@ Deliverables:
 
 Exit criteria:
 
-- `docker compose up` starts API, Postgres, and Redis.
+- `docker compose up` starts API, SQLite-backed storage, and Redis.
 - `GET /healthz` returns healthy state.
 - RTK-backed CLI proxy code is available through `mizan-rtk`.
 - Core modules remain separated by concern rather than collapsed into one large

@@ -1,7 +1,20 @@
 # Migrations
 
-Database migrations will live here once the storage foundation starts.
+This directory stores SQL migrations for the first schema phase.
 
-The first migration should create users, sessions, API keys, providers, model
-routes, wallets, credit ledger rows, usage events, request logs, and admin audit
-logs.
+Run migrations through the application startup, which runs from `mizan-api` when
+`run_from_env` boots.
+
+Current versions:
+
+- `0001_initial.sql`
+  - users
+  - sessions
+  - api_keys
+  - provider_connections
+  - model_routes
+  - wallets
+  - credit_ledger
+  - usage_events
+  - request_logs
+  - admin_audit_logs

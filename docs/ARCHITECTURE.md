@@ -2,13 +2,13 @@
 
 ## Recommendation
 
-Build the MVP in Rust with Redis and PostgreSQL.
+Build the MVP in Rust with Redis and SQLite-first storage.
 
 The practical recommendation is:
 
 - Rust for the gateway, backend APIs, and RTK-based CLI proxy layer.
 - Redis for hot-path runtime controls.
-- PostgreSQL for users, routes, provider config, usage events, and credit ledger.
+- SQLite for local-first storage, with PostgreSQL-ready migration compatibility.
 - RTK as the starting implementation base for command-output filtering,
   token-saving CLI proxy behavior, and developer-tool integration.
 
@@ -62,7 +62,7 @@ flowchart LR
     Router --> Provider["Upstream provider or local model"]
     Provider --> Meter["Usage meter"]
     Meter --> Ledger["Credit ledger"]
-    Ledger --> DB["PostgreSQL"]
+    Ledger --> DB["SQLite (default)"]
     Limits --> Redis["Redis"]
 ```
 
@@ -229,7 +229,7 @@ Runtime Redis keys:
 ```mermaid
 flowchart TB
     Internet["Clients"] --> API["mizan-api"]
-    API --> Postgres["PostgreSQL"]
+    API --> Postgres["SQLite (default)"]
     API --> Redis["Redis"]
     API --> Upstream["AI providers or local model endpoints"]
 ```
@@ -237,7 +237,7 @@ flowchart TB
 Local MVP:
 
 - `mizan-api`
-- `postgres`
+- `sqlite` (data directory in compose volume)
 - `redis`
 - Optional `ollama` or local OpenAI-compatible server
 
