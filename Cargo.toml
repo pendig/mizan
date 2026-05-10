@@ -22,7 +22,7 @@ rust-version = "1.95"
 [workspace.dependencies]
 async-trait = "0.1"
 axum = "0.8"
-redis = "0.32"
+redis = "1.2"
 sha2 = "0.10.8"
 bcrypt = "0.15"
 serde = { version = "1", features = ["derive"] }
