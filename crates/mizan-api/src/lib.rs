@@ -1,6 +1,7 @@
 use axum::{
     Json, Router,
     extract::State,
+    http::StatusCode,
     middleware::from_fn_with_state,
     response::IntoResponse,
     routing::{delete, get, post},
@@ -11,8 +12,9 @@ use redis::Client as RedisClient;
 use serde::Serialize;
 use sqlx::{AnyPool, query_scalar};
 use tokio::net::TcpListener;
+use tokio::task;
 use tower_http::trace::TraceLayer;
-use tracing::{error, info};
+use tracing::{info, warn};
 
 mod auth;
 mod storage;
@@ -27,8 +29,12 @@ pub struct AppState {
 
 impl AppState {
     pub async fn new(config: AppConfig) -> AppResult<Self> {
-        let database =
-            storage::connect_and_migrate(&config.database_url, config.run_migrations).await?;
+        let database = storage::connect_and_migrate(
+            &config.database_url,
+            config.run_migrations,
+            config.database_max_connections,
+        )
+        .await?;
 
         let redis = RedisClient::open(config.redis_url.as_str())
             .map_err(|err| AppError::infrastructure(err.to_string()))?;
@@ -46,6 +52,7 @@ impl AppState {
         ) {
             auth::ensure_admin_seed(
                 &state.database,
+                state.database_backend(),
                 email,
                 password,
                 &state.config.admin_seed_role,
@@ -65,6 +72,34 @@ impl AppState {
 
     pub fn database_backend(&self) -> DatabaseBackend {
         self.config.database_backend
+    }
+
+    pub async fn check_redis(&self) -> bool {
+        let client = self.redis.clone();
+        let result = task::spawn_blocking(move || -> AppResult<bool> {
+            let mut connection = client
+                .get_connection()
+                .map_err(|error| AppError::infrastructure(error.to_string()))?;
+
+            let response: String = redis::cmd("PING")
+                .query(&mut connection)
+                .map_err(|error| AppError::infrastructure(error.to_string()))?;
+
+            Ok(response == "PONG")
+        })
+        .await;
+
+        match result {
+            Ok(Ok(response)) => response,
+            Ok(Err(error)) => {
+                warn!(error = %error, "redis ping failed");
+                false
+            }
+            Err(error) => {
+                warn!(error = %error, "redis ping task failed");
+                false
+            }
+        }
     }
 }
 
@@ -139,15 +174,17 @@ async fn healthz() -> Json<HealthResponse> {
     })
 }
 
-async fn readyz(State(state): State<AppState>) -> Json<HealthResponse> {
+async fn readyz(State(state): State<AppState>) -> (StatusCode, Json<HealthResponse>) {
     let database_ok = state.check_database().await;
-    let status = if database_ok { "ready" } else { "not_ready" };
+    let redis_ok = state.check_redis().await;
+    let ready = database_ok && redis_ok;
     let dependencies = HealthDependencies {
         database_backend: state.database_backend().as_str(),
         database: if database_ok { "ok" } else { "not_ready" },
-        redis: "not_checked",
+        redis: if redis_ok { "ok" } else { "not_ready" },
     };
 
+    let status = if ready { "ready" } else { "not_ready" };
     let response = HealthResponse {
         status,
         service: "mizan-api",
@@ -155,11 +192,15 @@ async fn readyz(State(state): State<AppState>) -> Json<HealthResponse> {
         dependencies,
     };
 
-    Json(response)
+    if ready {
+        (StatusCode::OK, Json(response))
+    } else {
+        (StatusCode::SERVICE_UNAVAILABLE, Json(response))
+    }
 }
 
 async fn not_found() -> impl IntoResponse {
-    error!("unmatched route");
+    warn!("unmatched route");
     (
         axum::http::StatusCode::NOT_FOUND,
         Json(ErrorEnvelope::from(&AppError::NotFound(

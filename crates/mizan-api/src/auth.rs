@@ -8,7 +8,7 @@ use axum::{
     middleware::Next,
     response::Response,
 };
-use mizan_core::{AppError, AppResult, ErrorEnvelope};
+use mizan_core::{AppError, AppResult, DatabaseBackend, ErrorEnvelope};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlx::{AnyPool, Row, query, query_as};
@@ -112,6 +112,7 @@ struct DbUser {
 
 pub async fn ensure_admin_seed(
     database: &AnyPool,
+    database_backend: DatabaseBackend,
     email: &str,
     password: &str,
     role: &str,
@@ -124,21 +125,24 @@ pub async fn ensure_admin_seed(
         ));
     }
 
-    if let Some(user) = find_user_by_email(database, &email).await? {
+    if let Some(user) = find_user_by_email(database, database_backend, &email).await? {
         if user.role != role {
-            query("UPDATE users SET role = ? WHERE id = ?")
-                .bind(role)
-                .bind(user.id.to_string())
-                .execute(database)
-                .await
-                .map_err(|error| {
-                    AppError::infrastructure(format!("cannot update seeded admin role: {error}"))
-                })?;
+            query(&prepare_sql(
+                database_backend,
+                "UPDATE users SET role = ? WHERE id = ?",
+            ))
+            .bind(role)
+            .bind(user.id.to_string())
+            .execute(database)
+            .await
+            .map_err(|error| {
+                AppError::infrastructure(format!("cannot update seeded admin role: {error}"))
+            })?;
         }
         return Ok(());
     }
 
-    create_user(database, &email, password, role).await?;
+    create_user(database, database_backend, &email, password, role).await?;
     Ok(())
 }
 
@@ -156,9 +160,15 @@ pub async fn register(
         ));
     }
 
-    let user = create_user(&state.database, &email, &password, "member")
-        .await
-        .map_err(from_app_error)?;
+    let user = create_user(
+        &state.database,
+        state.database_backend(),
+        &email,
+        &password,
+        "member",
+    )
+    .await
+    .map_err(from_app_error)?;
 
     Ok(Json(user))
 }
@@ -177,7 +187,7 @@ pub async fn login(
         ));
     }
 
-    let user = find_user_by_email(&state.database, &email)
+    let user = find_user_by_email(&state.database, state.database_backend(), &email)
         .await
         .map_err(from_app_error)?
         .ok_or_else(|| map_error(StatusCode::UNAUTHORIZED, AppError::Unauthorized))?;
@@ -193,7 +203,7 @@ pub async fn login(
         return Err(map_error(StatusCode::UNAUTHORIZED, AppError::Unauthorized));
     }
 
-    let session = create_session(&state.database, user.id)
+    let session = create_session(&state.database, state.database_backend(), user.id)
         .await
         .map_err(from_app_error)?;
     Ok(Json(LoginResponse {
@@ -210,8 +220,9 @@ pub async fn create_api_key(
     headers: HeaderMap,
     Json(payload): Json<ApiKeyCreateRequest>,
 ) -> AuthHttpResult<Json<ApiKeyCreateResponse>> {
-    let user_id = session_user_id_from_header(&state.database, &headers).await?;
-    let response = create_api_key_for_user(&state.database, user_id, payload.label)
+    let backend = state.database_backend();
+    let user_id = session_user_id_from_header(&state.database, backend, &headers).await?;
+    let response = create_api_key_for_user(&state.database, backend, user_id, payload.label)
         .await
         .map_err(from_app_error)?;
     Ok(Json(response))
@@ -221,8 +232,9 @@ pub async fn list_api_keys(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> AuthHttpResult<Json<ApiKeyListResponse>> {
-    let user_id = session_user_id_from_header(&state.database, &headers).await?;
-    let keys = list_api_keys_for_user(&state.database, user_id)
+    let backend = state.database_backend();
+    let user_id = session_user_id_from_header(&state.database, backend, &headers).await?;
+    let keys = list_api_keys_for_user(&state.database, backend, user_id)
         .await
         .map_err(from_app_error)?;
     Ok(Json(ApiKeyListResponse { keys }))
@@ -233,8 +245,9 @@ pub async fn revoke_api_key(
     headers: HeaderMap,
     Path(api_key_id): Path<Uuid>,
 ) -> AuthHttpResult<Json<ApiKeyRevokeResponse>> {
-    let user_id = session_user_id_from_header(&state.database, &headers).await?;
-    let revoked = revoke_api_key_by_owner(&state.database, user_id, api_key_id)
+    let backend = state.database_backend();
+    let user_id = session_user_id_from_header(&state.database, backend, &headers).await?;
+    let revoked = revoke_api_key_by_owner(&state.database, backend, user_id, api_key_id)
         .await
         .map_err(from_app_error)?;
 
@@ -248,8 +261,9 @@ pub async fn me(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> AuthHttpResult<Json<MeResponse>> {
-    let user_id = session_user_id_from_header(&state.database, &headers).await?;
-    let role = find_user_role_by_id(&state.database, user_id)
+    let backend = state.database_backend();
+    let user_id = session_user_id_from_header(&state.database, backend, &headers).await?;
+    let role = find_user_role_by_id(&state.database, backend, user_id)
         .await
         .map_err(from_app_error)?;
     Ok(Json(MeResponse { user_id, role }))
@@ -276,13 +290,15 @@ pub async fn api_key_auth(
         .and_then(|value| value.to_str().ok())
         .ok_or_else(|| map_error(StatusCode::UNAUTHORIZED, AppError::Unauthorized))?;
 
-    let identity = resolve_api_key_identity(&state.database, authorization).await?;
+    let identity =
+        resolve_api_key_identity(&state.database, state.database_backend(), authorization).await?;
     request.extensions_mut().insert(identity);
     Ok(next.run(request).await)
 }
 
 async fn create_user(
     database: &AnyPool,
+    database_backend: DatabaseBackend,
     email: &str,
     password: &str,
     role: &str,
@@ -292,10 +308,11 @@ async fn create_user(
     let now = unix_timestamp_string();
     let id = Uuid::now_v7();
 
-    let affected = query(
+    let affected = query(&prepare_sql(
+        database_backend,
         "INSERT INTO users (id, email, password_hash, role, created_at, updated_at)
          VALUES (?, ?, ?, ?, ?, ?)",
-    )
+    ))
     .bind(id.to_string())
     .bind(email)
     .bind(hashed)
@@ -324,12 +341,19 @@ async fn create_user(
     })
 }
 
-async fn find_user_by_email(database: &AnyPool, email: &str) -> AppResult<Option<DbUser>> {
-    let row = query("SELECT id, password_hash, role FROM users WHERE email = ?")
-        .bind(email)
-        .fetch_optional(database)
-        .await
-        .map_err(|error| AppError::infrastructure(error.to_string()))?;
+async fn find_user_by_email(
+    database: &AnyPool,
+    database_backend: DatabaseBackend,
+    email: &str,
+) -> AppResult<Option<DbUser>> {
+    let row = query(&prepare_sql(
+        database_backend,
+        "SELECT id, password_hash, role FROM users WHERE email = ?",
+    ))
+    .bind(email)
+    .fetch_optional(database)
+    .await
+    .map_err(|error| AppError::infrastructure(error.to_string()))?;
 
     let Some(row) = row else {
         return Ok(None);
@@ -355,19 +379,30 @@ async fn find_user_by_email(database: &AnyPool, email: &str) -> AppResult<Option
     }))
 }
 
-async fn find_user_role_by_id(database: &AnyPool, user_id: Uuid) -> AppResult<String> {
-    let role = query_as::<_, (String,)>("SELECT role FROM users WHERE id = ?")
-        .bind(user_id.to_string())
-        .fetch_optional(database)
-        .await
-        .map_err(|error| AppError::infrastructure(error.to_string()))?
-        .map(|row| row.0)
-        .ok_or_else(|| AppError::NotFound("user not found".to_string()))?;
+async fn find_user_role_by_id(
+    database: &AnyPool,
+    database_backend: DatabaseBackend,
+    user_id: Uuid,
+) -> AppResult<String> {
+    let role = query_as::<_, (String,)>(&prepare_sql(
+        database_backend,
+        "SELECT role FROM users WHERE id = ?",
+    ))
+    .bind(user_id.to_string())
+    .fetch_optional(database)
+    .await
+    .map_err(|error| AppError::infrastructure(error.to_string()))?
+    .map(|row| row.0)
+    .ok_or_else(|| AppError::NotFound("user not found".to_string()))?;
 
     Ok(role)
 }
 
-async fn create_session(database: &AnyPool, user_id: Uuid) -> AppResult<SessionRecord> {
+async fn create_session(
+    database: &AnyPool,
+    database_backend: DatabaseBackend,
+    user_id: Uuid,
+) -> AppResult<SessionRecord> {
     let id = Uuid::now_v7();
     let token = format!("{}{}", SESSION_TOKEN_PREFIX, id);
     let token_hash = hash_value(&token);
@@ -375,7 +410,8 @@ async fn create_session(database: &AnyPool, user_id: Uuid) -> AppResult<SessionR
     let expires_at = (now + SESSION_TTL_SECONDS).to_string();
     let timestamp = now.to_string();
 
-    let result = query(
+    let result = query(&prepare_sql(
+        database_backend,
         "INSERT INTO sessions (
              id,
              user_id,
@@ -386,7 +422,7 @@ async fn create_session(database: &AnyPool, user_id: Uuid) -> AppResult<SessionR
              updated_at
          )
          VALUES (?, ?, ?, ?, 0, ?, ?)",
-    )
+    ))
     .bind(id.to_string())
     .bind(user_id.to_string())
     .bind(token_hash)
@@ -406,6 +442,7 @@ async fn create_session(database: &AnyPool, user_id: Uuid) -> AppResult<SessionR
 
 async fn create_api_key_for_user(
     database: &AnyPool,
+    database_backend: DatabaseBackend,
     user_id: Uuid,
     label: Option<String>,
 ) -> AppResult<ApiKeyCreateResponse> {
@@ -414,10 +451,11 @@ async fn create_api_key_for_user(
     let key_hash = hash_value(&key);
     let now = unix_timestamp_string();
 
-    let result = query(
+    let result = query(&prepare_sql(
+        database_backend,
         "INSERT INTO api_keys (id, user_id, key_hash, label, revoked, created_at, updated_at)
          VALUES (?, ?, ?, ?, 0, ?, ?)",
-    )
+    ))
     .bind(id.to_string())
     .bind(user_id.to_string())
     .bind(key_hash)
@@ -442,10 +480,14 @@ async fn create_api_key_for_user(
 
 async fn list_api_keys_for_user(
     database: &AnyPool,
+    database_backend: DatabaseBackend,
     user_id: Uuid,
 ) -> AppResult<Vec<ApiKeyListItem>> {
     let rows = query_as::<_, (String, Option<String>, String)>(
-        "SELECT id, label, created_at FROM api_keys WHERE user_id = ? AND revoked = 0 ORDER BY created_at DESC",
+        &prepare_sql(
+            database_backend,
+            "SELECT id, label, created_at FROM api_keys WHERE user_id = ? AND revoked = 0 ORDER BY created_at DESC",
+        ),
     )
         .bind(user_id.to_string())
         .fetch_all(database)
@@ -468,14 +510,16 @@ async fn list_api_keys_for_user(
 
 async fn revoke_api_key_by_owner(
     database: &AnyPool,
+    database_backend: DatabaseBackend,
     user_id: Uuid,
     api_key_id: Uuid,
 ) -> AppResult<bool> {
-    let result = query(
+    let result = query(&prepare_sql(
+        database_backend,
         "UPDATE api_keys
          SET revoked = 1, updated_at = ?
          WHERE id = ? AND user_id = ? AND revoked = 0",
-    )
+    ))
     .bind(unix_timestamp_string())
     .bind(api_key_id.to_string())
     .bind(user_id.to_string())
@@ -488,20 +532,20 @@ async fn revoke_api_key_by_owner(
 
 async fn resolve_api_key_identity(
     database: &AnyPool,
+    database_backend: DatabaseBackend,
     authorization: &str,
 ) -> AuthHttpResult<ApiKeyIdentity> {
-    let token = authorization
-        .trim()
-        .strip_prefix("Bearer ")
+    let token = authorization_token(authorization)
         .ok_or_else(|| map_error(StatusCode::UNAUTHORIZED, AppError::Unauthorized))?;
 
     let token_hash = hash_value(token);
-    let (api_key_id, user_id, user_role) = query_as::<_, (String, String, String)>(
+    let (api_key_id, user_id, user_role) = query_as::<_, (String, String, String)>(&prepare_sql(
+        database_backend,
         "SELECT ak.id, ak.user_id, COALESCE(u.role, 'member') AS user_role
          FROM api_keys ak
          LEFT JOIN users u ON u.id = ak.user_id
          WHERE ak.key_hash = ? AND ak.revoked = 0",
-    )
+    ))
     .bind(token_hash)
     .fetch_optional(database)
     .await
@@ -535,21 +579,19 @@ async fn resolve_api_key_identity(
 
 async fn session_user_id_from_header(
     database: &AnyPool,
+    database_backend: DatabaseBackend,
     headers: &HeaderMap,
 ) -> AuthHttpResult<Uuid> {
-    let raw_token = headers
-        .get(SESSION_HEADER)
-        .and_then(|value| value.to_str().ok())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+    let raw_token = session_token_from_headers(headers)
         .ok_or_else(|| map_error(StatusCode::UNAUTHORIZED, AppError::Unauthorized))?;
 
     let token_hash = hash_value(raw_token);
-    let row = query(
+    let row = query(&prepare_sql(
+        database_backend,
         "SELECT id, user_id, expires_at
          FROM sessions
          WHERE session_token_hash = ? AND revoked = 0",
-    )
+    ))
     .bind(token_hash)
     .fetch_optional(database)
     .await
@@ -586,11 +628,14 @@ async fn session_user_id_from_header(
                 user_id = %user_id,
                 "session expired, revoking"
             );
-            query("UPDATE sessions SET revoked = 1 WHERE id = ?")
-                .bind(&session_id)
-                .execute(database)
-                .await
-                .ok();
+            query(&prepare_sql(
+                database_backend,
+                "UPDATE sessions SET revoked = 1 WHERE id = ?",
+            ))
+            .bind(&session_id)
+            .execute(database)
+            .await
+            .ok();
             return Err(map_error(StatusCode::UNAUTHORIZED, AppError::Unauthorized));
         }
     } else {
@@ -606,6 +651,55 @@ async fn session_user_id_from_header(
             AppError::invalid_config("session", error.to_string()),
         )
     })
+}
+
+fn authorization_token(raw_authorization: &str) -> Option<&str> {
+    let mut split = raw_authorization.split_whitespace();
+    let scheme = split.next()?;
+    if !scheme.eq_ignore_ascii_case("Bearer") {
+        return None;
+    }
+
+    split.next()
+}
+
+fn session_token_from_headers(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get(AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(authorization_token)
+        .or_else(|| {
+            headers
+                .get(SESSION_HEADER)
+                .and_then(|value| value.to_str().ok())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+        })
+}
+
+fn prepare_sql(database_backend: DatabaseBackend, query: &'static str) -> String {
+    match database_backend {
+        DatabaseBackend::Sqlite => query.to_string(),
+        DatabaseBackend::Postgres => to_dollar_params(query),
+    }
+}
+
+fn to_dollar_params(query: &str) -> String {
+    let mut parameter_index = 0usize;
+    let mut converted = String::with_capacity(query.len());
+
+    for character in query.chars() {
+        if character == '?' {
+            parameter_index += 1;
+            converted.push('$');
+            converted.push_str(&parameter_index.to_string());
+            continue;
+        }
+
+        converted.push(character);
+    }
+
+    converted
 }
 
 fn map_error(status: StatusCode, error: AppError) -> (StatusCode, Json<ErrorEnvelope>) {
@@ -673,5 +767,44 @@ mod tests {
     #[test]
     fn normalize_email_is_lowercase_and_trimmed() {
         assert_eq!(normalize_email("  User@Example.COM "), "user@example.com");
+    }
+
+    #[test]
+    fn prepare_sql_keeps_question_marks_for_sqlite() {
+        let prepared = prepare_sql(
+            DatabaseBackend::Sqlite,
+            "SELECT id FROM users WHERE id = ? AND role = ?",
+        );
+        assert_eq!(prepared, "SELECT id FROM users WHERE id = ? AND role = ?");
+    }
+
+    #[test]
+    fn prepare_sql_converts_question_marks_for_postgres() {
+        let prepared = prepare_sql(
+            DatabaseBackend::Postgres,
+            "SELECT id FROM users WHERE id = ? AND role = ?",
+        );
+        assert_eq!(prepared, "SELECT id FROM users WHERE id = $1 AND role = $2");
+    }
+
+    #[test]
+    fn authorization_token_supports_bearer_scheme() {
+        assert_eq!(
+            authorization_token("Bearer mizan_sk_live_abc"),
+            Some("mizan_sk_live_abc")
+        );
+        assert_eq!(authorization_token("bearer token"), Some("token"));
+        assert_eq!(authorization_token("Token abc"), None);
+    }
+
+    #[test]
+    fn normalize_and_extract_session_token_prefers_authorization_first() {
+        use axum::http::HeaderValue;
+
+        let mut headers = HeaderMap::new();
+        headers.insert(AUTHORIZATION, HeaderValue::from_static("Bearer session"));
+        headers.insert(SESSION_HEADER, HeaderValue::from_static("legacy"));
+
+        assert_eq!(session_token_from_headers(&headers), Some("session"));
     }
 }

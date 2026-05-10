@@ -5,13 +5,23 @@ use sqlx::{AnyPool, any::AnyPoolOptions, any::install_default_drivers, migrate::
 
 static MIGRATOR: Migrator = sqlx::migrate!("./../../migrations");
 
-pub async fn connect_and_migrate(database_url: &str, run_migrations: bool) -> AppResult<AnyPool> {
-    ensure_sqlite_parent_directory(database_url)?;
+pub async fn connect_and_migrate(
+    database_url: &str,
+    run_migrations: bool,
+    max_connections: u32,
+) -> AppResult<AnyPool> {
+    ensure_sqlite_parent_directory(database_url).await?;
 
     install_default_drivers();
 
+    let max_connections = if is_sqlite_in_memory(database_url) {
+        1
+    } else {
+        max_connections.max(1)
+    };
+
     let pool = AnyPoolOptions::new()
-        .max_connections(10)
+        .max_connections(max_connections)
         .connect(database_url)
         .await
         .map_err(AppError::infrastructure)?;
@@ -26,12 +36,16 @@ pub async fn connect_and_migrate(database_url: &str, run_migrations: bool) -> Ap
     Ok(pool)
 }
 
-fn ensure_sqlite_parent_directory(database_url: &str) -> AppResult<()> {
-    if !database_url.starts_with("sqlite://") {
+async fn ensure_sqlite_parent_directory(database_url: &str) -> AppResult<()> {
+    if !database_url.starts_with("sqlite://") && !database_url.starts_with("sqlite:") {
         return Ok(());
     }
 
-    let path = database_url.trim_start_matches("sqlite://");
+    let path = if let Some(path) = database_url.strip_prefix("sqlite://") {
+        path
+    } else {
+        database_url.strip_prefix("sqlite:").unwrap_or(database_url)
+    };
     let path = path.split('?').next().unwrap_or(path);
 
     if path == ":memory:" || path.is_empty() {
@@ -43,13 +57,28 @@ fn ensure_sqlite_parent_directory(database_url: &str) -> AppResult<()> {
         .filter(|parent| !parent.as_os_str().is_empty());
     match parent {
         Some(parent) => {
-            std::fs::create_dir_all(parent).map_err(|error| {
+            tokio::fs::create_dir_all(parent).await.map_err(|error| {
                 AppError::infrastructure(format!("cannot create sqlite data directory: {error}"))
             })?;
             Ok(())
         }
         None => Ok(()),
     }
+}
+
+fn is_sqlite_in_memory(database_url: &str) -> bool {
+    if !database_url.starts_with("sqlite://") && !database_url.starts_with("sqlite:") {
+        return false;
+    }
+
+    let path = if let Some(path) = database_url.strip_prefix("sqlite://") {
+        path
+    } else {
+        database_url.strip_prefix("sqlite:").unwrap_or(database_url)
+    };
+    let path = path.split('?').next().unwrap_or(path);
+
+    path == ":memory:" || path == "file::memory:"
 }
 
 #[cfg(test)]
@@ -77,10 +106,10 @@ mod tests {
     async fn migration_applies_idempotently_and_creates_schema_objects() {
         let (database_url, path) = temporary_sqlite_database();
 
-        let _first_pool = connect_and_migrate(&database_url, true)
+        let _first_pool = connect_and_migrate(&database_url, true, 10)
             .await
             .expect("run migration once");
-        let pool = connect_and_migrate(&database_url, true)
+        let pool = connect_and_migrate(&database_url, true, 10)
             .await
             .expect("run migration twice");
 
@@ -144,18 +173,39 @@ mod tests {
         fs::remove_file(path).ok();
     }
 
-    #[test]
-    fn ensure_sqlite_parent_directory_handles_nested_paths() {
+    #[tokio::test]
+    async fn ensure_sqlite_parent_directory_handles_nested_paths() {
         let path = std::env::temp_dir()
             .join("mizan-test-parent")
             .join("nested");
         let database_url = format!("sqlite://{}?mode=rwc", path.join("mizan.sqlite3").display());
 
         ensure_sqlite_parent_directory(&database_url)
+            .await
             .expect("ensure directory creation should succeed");
 
         assert!(path.exists());
 
         fs::remove_dir_all(std::env::temp_dir().join("mizan-test-parent")).ok();
+    }
+
+    #[tokio::test]
+    async fn sqlite_in_memory_connection_uses_single_connection() {
+        let database_url = "sqlite::memory:".to_string();
+        let pool = connect_and_migrate(&database_url, false, 10)
+            .await
+            .expect("open sqlite memory DB");
+        assert!(
+            pool.acquire().await.is_ok(),
+            "failed to acquire memory connection"
+        );
+        drop(pool);
+    }
+
+    #[test]
+    fn in_memory_sqlite_urls_are_detected() {
+        assert!(is_sqlite_in_memory("sqlite://:memory:"));
+        assert!(is_sqlite_in_memory("sqlite::memory:"));
+        assert!(!is_sqlite_in_memory("postgres://localhost/db"));
     }
 }

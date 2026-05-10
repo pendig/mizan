@@ -7,6 +7,7 @@ pub struct AppConfig {
     pub http_addr: SocketAddr,
     pub database_backend: DatabaseBackend,
     pub database_url: String,
+    pub database_max_connections: u32,
     pub run_migrations: bool,
     pub redis_url: String,
     pub log_level: String,
@@ -53,14 +54,25 @@ impl AppConfig {
             (admin_seed_email.as_deref(), admin_seed_password.as_deref()),
             (Some(_), Some(_)) | (None, None)
         ) {
+            let database_max_connections = env::var("MIZAN_DB_MAX_CONNECTIONS").map_or(
+                Ok(DEFAULT_DATABASE_MAX_CONNECTIONS),
+                |value| {
+                    parse_u32_env(
+                        "MIZAN_DB_MAX_CONNECTIONS",
+                        &value,
+                        DEFAULT_DATABASE_MAX_CONNECTIONS,
+                    )
+                },
+            )?;
+
             Ok(Self {
                 http_addr,
                 database_backend: DatabaseBackend::from_url(&database_url)?,
                 database_url,
-                run_migrations: env::var("MIZAN_RUN_MIGRATIONS")
-                    .unwrap_or_else(|_| "true".to_owned())
-                    .parse()
-                    .unwrap_or(true),
+                database_max_connections,
+                run_migrations: parse_bool_env("MIZAN_RUN_MIGRATIONS", "true", |value| {
+                    parse_bool_value("MIZAN_RUN_MIGRATIONS", value)
+                })?,
                 redis_url: env::var("REDIS_URL")
                     .unwrap_or_else(|_| "redis://127.0.0.1:6379/".to_owned()),
                 log_level: env::var("RUST_LOG")
@@ -79,11 +91,17 @@ impl AppConfig {
 }
 
 fn normalize_sqlite_url(database_url: String) -> AppResult<String> {
-    if !database_url.starts_with("sqlite://") {
+    if !database_url.starts_with("sqlite://") && !database_url.starts_with("sqlite:") {
         return Ok(database_url);
     }
 
-    let trimmed = database_url.trim_start_matches("sqlite://");
+    let trimmed = if let Some(trimmed) = database_url.strip_prefix("sqlite://") {
+        trimmed
+    } else {
+        database_url
+            .strip_prefix("sqlite:")
+            .unwrap_or(&database_url)
+    };
     let mut parts = trimmed.splitn(2, '?');
     let path_part = parts.next().unwrap_or_default();
     let query_part = parts.next();
@@ -117,6 +135,49 @@ fn normalize_sqlite_url(database_url: String) -> AppResult<String> {
     Ok(normalized)
 }
 
+fn parse_bool_env(
+    key: &'static str,
+    default: &str,
+    parser: impl Fn(&str) -> AppResult<bool>,
+) -> AppResult<bool> {
+    let value = env::var(key).unwrap_or_else(|_| default.to_owned());
+    parser(value.as_str())
+}
+
+fn parse_bool_value(key: &'static str, raw_value: &str) -> AppResult<bool> {
+    match raw_value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "t" | "yes" | "y" | "on" => Ok(true),
+        "0" | "false" | "f" | "no" | "n" | "off" => Ok(false),
+        "" => Err(AppError::invalid_config(
+            key,
+            "expected a boolean value: true, false, 1, 0, yes, no",
+        )),
+        _ => Err(AppError::invalid_config(
+            key,
+            "invalid boolean value, use true|false|1|0|yes|no|on|off",
+        )),
+    }
+}
+
+const DEFAULT_DATABASE_MAX_CONNECTIONS: u32 = 10;
+
+fn parse_u32_env(key: &'static str, raw_value: &str, default: u32) -> AppResult<u32> {
+    let value = raw_value.trim();
+    if value.is_empty() {
+        return Ok(default);
+    }
+
+    let parsed = value
+        .parse::<u32>()
+        .map_err(|_| AppError::invalid_config(key, "must be a positive integer"))?;
+
+    if parsed == 0 {
+        return Err(AppError::invalid_config(key, "must be greater than zero"));
+    }
+
+    Ok(parsed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -129,5 +190,31 @@ mod tests {
         assert!(normalized.starts_with("sqlite://"));
         assert!(normalized.contains("?mode=rwc"));
         assert!(normalized.ends_with("data/test.sqlite3?mode=rwc"));
+    }
+
+    #[test]
+    fn normalizes_legacy_sqlite_url_to_absolute_path() {
+        let normalized =
+            normalize_sqlite_url("sqlite:./data/legacy.sqlite3".to_string()).expect("normalize");
+
+        assert!(normalized.starts_with("sqlite://"));
+        assert!(normalized.contains("?mode=rwc"));
+        assert!(normalized.ends_with("data/legacy.sqlite3?mode=rwc"));
+    }
+
+    #[test]
+    fn parse_bool_env_uses_default_when_missing() {
+        let value = parse_bool_value("MIZAN_RUN_MIGRATIONS", "true").expect("true");
+        assert!(value);
+        let value = parse_bool_value("MIZAN_RUN_MIGRATIONS", "0").expect("false");
+        assert!(!value);
+        assert!(parse_bool_value("MIZAN_RUN_MIGRATIONS", "").is_err());
+    }
+
+    #[test]
+    fn parse_u32_env_rejects_zero_or_invalid_values() {
+        assert!(parse_u32_env("MIZAN_DB_MAX_CONNECTIONS", "10", 10).expect("ok") == 10);
+        assert!(parse_u32_env("MIZAN_DB_MAX_CONNECTIONS", "0", 10).is_err());
+        assert!(parse_u32_env("MIZAN_DB_MAX_CONNECTIONS", "bad", 10).is_err());
     }
 }

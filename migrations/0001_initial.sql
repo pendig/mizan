@@ -14,7 +14,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     expires_at TEXT,
     revoked INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS api_keys (
@@ -24,7 +25,8 @@ CREATE TABLE IF NOT EXISTS api_keys (
     label TEXT,
     revoked INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS provider_connections (
@@ -48,7 +50,8 @@ CREATE TABLE IF NOT EXISTS model_routes (
     pricing_output_per_1m_tokens INTEGER NOT NULL DEFAULT 0,
     enabled INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (provider_connection_id) REFERENCES provider_connections (id) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS wallets (
@@ -56,7 +59,8 @@ CREATE TABLE IF NOT EXISTS wallets (
     owner_user_id TEXT NOT NULL,
     balance_microcredits INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (owner_user_id) REFERENCES users (id) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS credit_ledger (
@@ -66,7 +70,8 @@ CREATE TABLE IF NOT EXISTS credit_ledger (
     request_delta_microcredits INTEGER NOT NULL,
     balance_after_microcredits INTEGER NOT NULL,
     reason TEXT NOT NULL,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (wallet_id) REFERENCES wallets (id) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS usage_events (
@@ -83,7 +88,11 @@ CREATE TABLE IF NOT EXISTS usage_events (
     usage_estimated INTEGER NOT NULL DEFAULT 0,
     status_code INTEGER NOT NULL,
     latency_ms INTEGER NOT NULL,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE SET NULL,
+    FOREIGN KEY (api_key_id) REFERENCES api_keys (id) ON DELETE SET NULL,
+    FOREIGN KEY (provider_id) REFERENCES provider_connections (id) ON DELETE SET NULL,
+    FOREIGN KEY (route_id) REFERENCES model_routes (id) ON DELETE SET NULL
 );
 
 CREATE TABLE IF NOT EXISTS request_logs (
@@ -96,7 +105,11 @@ CREATE TABLE IF NOT EXISTS request_logs (
     method TEXT NOT NULL,
     path TEXT NOT NULL,
     status_code INTEGER NOT NULL,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE SET NULL,
+    FOREIGN KEY (api_key_id) REFERENCES api_keys (id) ON DELETE SET NULL,
+    FOREIGN KEY (provider_id) REFERENCES provider_connections (id) ON DELETE SET NULL,
+    FOREIGN KEY (route_id) REFERENCES model_routes (id) ON DELETE SET NULL
 );
 
 CREATE TABLE IF NOT EXISTS admin_audit_logs (
@@ -106,7 +119,8 @@ CREATE TABLE IF NOT EXISTS admin_audit_logs (
     entity_type TEXT NOT NULL,
     entity_id TEXT,
     payload_json TEXT,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (actor_user_id) REFERENCES users (id) ON DELETE SET NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_api_keys_user_id ON api_keys (user_id);
