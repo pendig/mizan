@@ -134,6 +134,14 @@ pub(crate) fn decrypt_provider_api_key(
         ));
     }
 
+    let expected_nonce = derive_nonce(provider_secret, provider_connection_id);
+    if data[..NONCE_BYTES] != expected_nonce {
+        return Err(AppError::invalid_config(
+            "provider_connection.api_key_encrypted",
+            "encrypted api key does not match this provider connection",
+        ));
+    }
+
     let nonce = aes_gcm::Nonce::<aes_gcm::aead::generic_array::typenum::U12>::from_slice(
         &data[..NONCE_BYTES],
     );
@@ -343,5 +351,21 @@ mod tests {
             .expect("encrypt provider key b");
 
         assert_ne!(encrypted_a, encrypted_b);
+    }
+
+    #[test]
+    fn provider_api_key_decryption_rejects_mismatched_connection_id() {
+        let provider_secret = "phase-1-secret-key";
+        let original = "sk-live-abc";
+        let id = Uuid::now_v7().to_string();
+        let other_id = Uuid::now_v7().to_string();
+
+        let encrypted =
+            encrypt_provider_api_key(provider_secret, &id, original).expect("encrypt provider key");
+        let error = decrypt_provider_api_key(provider_secret, &other_id, &encrypted)
+            .expect_err("mismatched connection should fail");
+
+        let message = format!("{error}");
+        assert!(message.contains("does not match this provider connection"));
     }
 }

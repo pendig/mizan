@@ -74,6 +74,16 @@ pub async fn chat_completions(
         ));
     }
 
+    if payload.stream {
+        return Err((
+            StatusCode::NOT_IMPLEMENTED,
+            Json(ErrorEnvelope::from(&AppError::invalid_config(
+                "chat_completion.stream",
+                "streaming is not supported yet, use stream=false",
+            ))),
+        ));
+    }
+
     let route = resolve_model_route(
         &state.database,
         state.database_backend(),
@@ -113,7 +123,7 @@ pub async fn chat_completions(
         .map_err(from_app_error)?;
 
     Ok(Json(map_to_chat_completion_response(
-        route.upstream_model,
+        public_model.to_string(),
         upstream_response,
     )))
 }
@@ -208,6 +218,7 @@ mod tests {
     #[test]
     fn map_to_chat_completion_response_uses_model_and_content() {
         let model = "openai/gpt-4o-mini".to_string();
+        let alias = "mizan-public-gpt-4o-mini".to_string();
         let upstream = ChatResponse {
             provider: "openai".to_string(),
             model: model.clone(),
@@ -220,9 +231,9 @@ mod tests {
             }),
         };
 
-        let response = map_to_chat_completion_response(model.clone(), upstream);
-        assert_eq!(response.model, model);
+        let response = map_to_chat_completion_response(alias.clone(), upstream);
         assert_eq!(response.choices.len(), 1);
         assert_eq!(response.choices[0].message.content, "pong");
+        assert_eq!(response.model, alias);
     }
 }
