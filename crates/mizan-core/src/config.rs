@@ -204,8 +204,8 @@ mod tests {
 
     #[test]
     fn preserves_sqlite_memory_urls_during_normalization() {
-        let with_legacy =
-            normalize_sqlite_url("sqlite:file::memory:?cache=shared".to_string()).expect("normalize");
+        let with_legacy = normalize_sqlite_url("sqlite:file::memory:?cache=shared".to_string())
+            .expect("normalize");
         assert_eq!(with_legacy, "sqlite:file::memory:?cache=shared");
 
         let with_double_slash =

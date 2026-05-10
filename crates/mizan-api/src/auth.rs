@@ -12,6 +12,7 @@ use mizan_core::{AppError, AppResult, DatabaseBackend, ErrorEnvelope};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlx::{AnyPool, Row, query, query_as};
+use tokio::task;
 use tracing::warn;
 use uuid::Uuid;
 
@@ -21,6 +22,7 @@ const SESSION_TOKEN_PREFIX: &str = "mizan_sess_";
 const API_KEY_PREFIX: &str = "mizan_sk_live_";
 const SESSION_TTL_SECONDS: i64 = 60 * 60 * 24 * 30;
 const SESSION_HEADER: &str = "x-session-token";
+const EMAIL_ALREADY_REGISTERED_ERROR: &str = "email is already registered";
 
 type AuthHttpResult<T> = Result<T, (StatusCode, Json<ErrorEnvelope>)>;
 
@@ -142,7 +144,40 @@ pub async fn ensure_admin_seed(
         return Ok(());
     }
 
-    create_user(database, database_backend, &email, password, role).await?;
+    if let Err(error) = create_user(database, database_backend, &email, password, role).await {
+        match &error {
+            AppError::InvalidConfig {
+                key: "email",
+                message,
+            } if message == EMAIL_ALREADY_REGISTERED_ERROR => {
+                let user = find_user_by_email(database, database_backend, &email)
+                    .await?
+                    .ok_or_else(|| {
+                        AppError::infrastructure(
+                            "admin user existed concurrently but cannot be resolved",
+                        )
+                    })?;
+
+                if user.role != role {
+                    query(&prepare_sql(
+                        database_backend,
+                        "UPDATE users SET role = ? WHERE id = ?",
+                    ))
+                    .bind(role)
+                    .bind(user.id.to_string())
+                    .execute(database)
+                    .await
+                    .map_err(|update_error| {
+                        AppError::infrastructure(format!(
+                            "cannot update seeded admin role after duplicate insert: {update_error}"
+                        ))
+                    })?;
+                }
+            }
+            _ => return Err(error),
+        }
+    }
+
     Ok(())
 }
 
@@ -192,12 +227,21 @@ pub async fn login(
         .map_err(from_app_error)?
         .ok_or_else(|| map_error(StatusCode::UNAUTHORIZED, AppError::Unauthorized))?;
 
-    let verified = bcrypt::verify(&password, &user.password_hash).map_err(|error| {
-        map_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            AppError::infrastructure(format!("password verification failed: {error}")),
-        )
-    })?;
+    let password_to_verify = user.password_hash.clone();
+    let verified = task::spawn_blocking(move || bcrypt::verify(&password, &password_to_verify))
+        .await
+        .map_err(|error| {
+            map_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                AppError::infrastructure(format!("password verification task failed: {error}")),
+            )
+        })?
+        .map_err(|error| {
+            map_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                AppError::infrastructure(format!("password verification failed: {error}")),
+            )
+        })?;
 
     if !verified {
         return Err(map_error(StatusCode::UNAUTHORIZED, AppError::Unauthorized));
@@ -324,7 +368,7 @@ async fn create_user(
     .map_err(|error| {
         let message = error.to_string();
         if is_unique_constraint_error(&message) {
-            AppError::invalid_config("email", "email is already registered")
+            AppError::invalid_config("email", EMAIL_ALREADY_REGISTERED_ERROR)
         } else {
             AppError::infrastructure(message)
         }
