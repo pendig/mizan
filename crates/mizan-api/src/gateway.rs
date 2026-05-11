@@ -12,9 +12,12 @@ use axum::{
         sse::{Event, Sse},
     },
 };
-use futures_util::stream;
+use futures_util::{StreamExt, stream};
 use mizan_core::{AppError, DatabaseBackend, ErrorEnvelope, RequestContext, RequestContextBuilder};
-use mizan_providers::{ChatMessage, ChatRequest, ChatResponse, OpenAiCompatibleProvider};
+use mizan_providers::{
+    ChatCompletionStream, ChatMessage, ChatRequest, ChatResponse, ChatStreamChunk,
+    OpenAiCompatibleProvider,
+};
 use serde::{Deserialize, Serialize};
 use sqlx::{AnyPool, query_as};
 use tracing::{info, warn};
@@ -68,7 +71,7 @@ pub struct ChatCompletionsResponse {
 struct ChatCompletionsStreamChoice {
     pub index: usize,
     pub delta: ChatCompletionsMessage,
-    pub finish_reason: Option<&'static str>,
+    pub finish_reason: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -86,6 +89,8 @@ struct ResolvedModelRoute {
     provider_connection_id: Uuid,
     upstream_model: String,
     provider_type: String,
+    provider_base_url: String,
+    provider_api_key: String,
 }
 
 pub async fn chat_completions(
@@ -161,32 +166,60 @@ pub async fn chat_completions(
         stream: payload.stream,
     };
 
-    let provider_name = if route.provider_type.eq_ignore_ascii_case("openai") {
-        "openai"
-    } else {
-        "openai-compatible"
-    };
-    let provider = OpenAiCompatibleProvider::new(provider_name);
-    let upstream_response = match state
-        .gateway
-        .chat_completions(&context, &provider, upstream_request)
-        .await
-    {
-        Ok(upstream_response) => upstream_response,
-        Err(error) => {
-            let (status, body) = from_app_error(normalize_provider_error(
-                error,
-                &context,
-                public_model.to_string(),
-            ));
-            return Ok(build_error_response(&context, status, body));
-        }
-    };
-
     let completion_id = format!("chatcmpl-{}", Uuid::now_v7());
-    let response = if payload.stream {
-        stream_chat_completion_response(&completion_id, public_model, upstream_response, &context)
+
+    let provider_name = if route.provider_type.eq_ignore_ascii_case("openai") {
+        "openai".to_owned()
     } else {
+        "openai-compatible".to_owned()
+    };
+    let provider = OpenAiCompatibleProvider::new(
+        provider_name,
+        route.provider_base_url,
+        route.provider_api_key,
+    );
+
+    let response = if payload.stream {
+        let upstream = match state
+            .gateway
+            .chat_completions_stream(&context, &provider, upstream_request)
+            .await
+        {
+            Ok(upstream) => upstream,
+            Err(error) => {
+                let (status, body) = from_app_error(normalize_provider_error(
+                    error,
+                    &context,
+                    public_model.to_string(),
+                ));
+                return Ok(build_error_response(&context, status, body));
+            }
+        };
+
+        stream_chat_completion_response(
+            &completion_id,
+            public_model.to_string(),
+            upstream,
+            &context,
+        )
+        .await
+    } else {
+        let upstream_response = match state
+            .gateway
+            .chat_completions(&context, &provider, upstream_request)
+            .await
+        {
+            Ok(upstream_response) => upstream_response,
+            Err(error) => {
+                let (status, body) = from_app_error(normalize_provider_error(
+                    error,
+                    &context,
+                    public_model.to_string(),
+                ));
+                return Ok(build_error_response(&context, status, body));
+            }
+        };
+
         json_chat_completion_response(
             &completion_id,
             public_model.to_string(),
@@ -269,13 +302,13 @@ fn json_chat_completion_response(
     response
 }
 
-fn stream_chat_completion_response(
+async fn stream_chat_completion_response(
     completion_id: &str,
-    model: &str,
-    upstream: ChatResponse,
+    model: String,
+    upstream: ChatCompletionStream,
     context: &RequestContext,
 ) -> Response {
-    let events = build_stream_events(completion_id, model.to_string(), upstream);
+    let events = build_stream_events(completion_id, model, upstream).await;
     let mut response = Sse::new(stream::iter(events)).into_response();
     attach_request_headers(&mut response, context);
     response.headers_mut().insert(
@@ -285,16 +318,30 @@ fn stream_chat_completion_response(
     response
 }
 
-fn build_stream_events(
+async fn build_stream_events(
     completion_id: &str,
     model: String,
-    upstream: ChatResponse,
+    upstream: ChatCompletionStream,
 ) -> Vec<Result<Event, Infallible>> {
-    let chunk = map_to_chat_completion_stream_response(completion_id.to_string(), model, upstream);
-    let first = Event::default()
-        .json_data(chunk)
-        .expect("chat completion chunk should serialize");
-    vec![Ok(first), Ok(Event::default().data("[DONE]"))]
+    let chunks: Vec<ChatStreamChunk> = upstream.collect().await;
+
+    let mut events = Vec::with_capacity(chunks.len() + 1);
+    let created = now_utc_epoch_seconds();
+
+    for upstream_chunk in chunks {
+        let chunk = map_to_chat_completion_stream_response(
+            completion_id.to_string(),
+            model.clone(),
+            created,
+            upstream_chunk,
+        );
+        events.push(Ok(Event::default()
+            .json_data(chunk)
+            .expect("chat completion chunk should serialize")));
+    }
+
+    events.push(Ok(Event::default().data("[DONE]")));
+    events
 }
 
 fn map_to_chat_completion_response(
@@ -326,20 +373,21 @@ fn map_to_chat_completion_response(
 fn map_to_chat_completion_stream_response(
     completion_id: String,
     model: String,
-    upstream: ChatResponse,
+    created: i64,
+    upstream: ChatStreamChunk,
 ) -> ChatCompletionsStreamResponse {
     ChatCompletionsStreamResponse {
         id: completion_id,
         object: "chat.completion.chunk",
-        created: now_utc_epoch_seconds(),
+        created,
         model,
         choices: vec![ChatCompletionsStreamChoice {
-            index: 0,
+            index: upstream.index,
             delta: ChatCompletionsMessage {
                 role: "assistant".to_string(),
-                content: upstream.content,
+                content: upstream.delta,
             },
-            finish_reason: Some("stop"),
+            finish_reason: upstream.finish_reason,
         }],
     }
 }
@@ -362,12 +410,13 @@ async fn resolve_model_route(
     provider_secret_key: Option<&str>,
     public_model: &str,
 ) -> Result<ResolvedModelRoute, AppError> {
-    let resolved = query_as::<_, (String, String, String, String, String)>(&prepare_sql(
+    let resolved = query_as::<_, (String, String, String, String, String, String)>(&prepare_sql(
         database_backend,
         "SELECT mr.id,
                 mr.upstream_model,
                 pc.provider_type,
                 pc.id,
+                pc.base_url,
                 pc.api_key_encrypted
          FROM model_routes mr
          INNER JOIN provider_connections pc
@@ -384,8 +433,14 @@ async fn resolve_model_route(
         AppError::invalid_config("chat_completion.model", "model not found or disabled")
     })?;
 
-    let (route_id, upstream_model, provider_type, provider_connection_id, encrypted_api_key) =
-        resolved;
+    let (
+        route_id,
+        upstream_model,
+        provider_type,
+        provider_connection_id,
+        provider_base_url,
+        encrypted_api_key,
+    ) = resolved;
     let id = Uuid::parse_str(&route_id).map_err(|error| {
         AppError::infrastructure(format!("stored route id is invalid: {error}"))
     })?;
@@ -400,7 +455,7 @@ async fn resolve_model_route(
             "set MIZAN_PROVIDER_SECRET_KEY before resolving model routes",
         )
     })?;
-    let _provider_api_key = decrypt_provider_api_key(
+    let provider_api_key = decrypt_provider_api_key(
         provider_secret_key,
         &provider_connection_id.to_string(),
         &encrypted_api_key,
@@ -411,6 +466,8 @@ async fn resolve_model_route(
         provider_connection_id,
         upstream_model,
         provider_type: provider_type.trim().to_string(),
+        provider_base_url,
+        provider_api_key,
     })
 }
 

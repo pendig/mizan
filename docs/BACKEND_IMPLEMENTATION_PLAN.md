@@ -141,7 +141,7 @@ Acceptance:
 
 ## Milestone 5 - Chat Completions Gateway
 
-Status: ✅ Non-streaming handler implemented, streaming upstream path still pending
+Status: ✅ POST `/v1/chat/completions` implemented with OpenAI-compatible streaming chunk forwarding
 
 Crates:
 
@@ -152,7 +152,7 @@ Tasks:
 
 - [x] Implement `POST /v1/chat/completions` route wiring.
 - [x] Implement non-streaming handler path and route resolution.
-- [x] Implement streaming proxy response envelope (SSE wrapper; full chunking depends on upstream stream support).
+- [x] Implement streaming proxy response envelope and upstream chunk forwarding for OpenAI-compatible providers.
 - [x] Normalize upstream errors.
 - [x] Attach request id to logs and responses.
 - [ ] Store request log without raw body by default.
@@ -162,8 +162,8 @@ Tasks:
 Acceptance:
 
 - OpenAI SDK can call the gateway by changing base URL.
-- Non-streaming calls work with the current stub response and route resolution.
-- Streaming response wrapper is implemented, with provider-native chunk forwarding deferred to provider streaming adapter expansion.
+- Non-streaming and streaming calls resolve model routes and call provider adapters.
+- Streaming now returns upstream chunk events as SSE `chat.completion.chunk`.
 - Upstream failure error shape alignment now normalized in handler layer.
 
 ## Milestone 6 - Usage and Credits
