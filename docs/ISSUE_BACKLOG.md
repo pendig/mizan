@@ -23,6 +23,8 @@ This backlog is ordered for a fast backend-first MVP.
 
 ## Storage
 
+Status: ✅ Implemented in current branch (`fda344c`)
+
 1. Add PostgreSQL migrations.
 2. Add migration runner.
 3. Create `users`, `api_keys`, `provider_connections`, `model_routes`,

@@ -15,6 +15,8 @@ runtime limit engine before building a large dashboard.
 
 Mizan is in active bootstrap-to-MVP delivery. Milestone 3 (auth/API keys) and
 Milestone 4 (provider/model management + `GET /v1/models`) are implemented.
+Milestone 2 (SQLite-first database foundation) is also implemented with
+idempotent migrations.
 Milestone 5 has a first `POST /v1/chat/completions` route with non-streaming
 flow and model routing in place; streaming, upstream error shaping, and request
 trace propagation are still in-progress.

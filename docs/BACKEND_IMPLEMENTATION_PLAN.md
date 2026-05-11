@@ -53,6 +53,8 @@ Acceptance:
 
 ## Milestone 2 - Database Foundation
 
+Status: ✅ Implemented in current branch (`fda344c`)
+
 First migration tables:
 
 - `users`
