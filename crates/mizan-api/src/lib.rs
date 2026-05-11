@@ -143,6 +143,7 @@ pub fn router(state: AppState) -> Router {
 
     let session_router = Router::new()
         .route("/me", get(auth::me))
+        .route("/auth/logout", post(auth::logout))
         .route(
             "/api-keys",
             post(auth::create_api_key).get(auth::list_api_keys),

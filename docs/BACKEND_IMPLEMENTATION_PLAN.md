@@ -87,6 +87,8 @@ Acceptance:
 
 ## Milestone 3 - Auth and API Keys
 
+Status: ✅ Implemented in current branch (`0be31d6` + this pass)
+
 Crates:
 
 - `crates/mizan-core`

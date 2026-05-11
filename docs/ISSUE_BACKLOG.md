@@ -34,6 +34,8 @@ Status: ✅ Implemented in current branch (`fda344c`)
 
 ## Auth
 
+Status: ✅ Implemented in current branch (`0be31d6` + this pass)
+
 1. Add password hashing.
 2. Add user registration/login.
 3. Add admin seed account from env.
