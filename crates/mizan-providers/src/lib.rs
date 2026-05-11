@@ -277,7 +277,7 @@ fn parse_stream_events(raw_body: &str) -> AppResult<Vec<ChatStreamChunk>> {
     for raw_line in raw_body.lines() {
         let line = raw_line.trim_end();
 
-        if line == "" {
+        if line.is_empty() {
             if event_data.trim().is_empty() {
                 continue;
             }
@@ -331,15 +331,15 @@ fn append_stream_event(chunks: &mut Vec<ChatStreamChunk>, raw_event_data: &str) 
         });
     }
 
-    if chunks.is_empty() {
-        if let Some(usage) = chunk.usage {
-            chunks.push(ChatStreamChunk {
-                index: 0,
-                delta: String::new(),
-                finish_reason: None,
-                usage: Some(normalize_usage(&usage)),
-            });
-        }
+    if chunks.is_empty()
+        && let Some(usage) = chunk.usage
+    {
+        chunks.push(ChatStreamChunk {
+            index: 0,
+            delta: String::new(),
+            finish_reason: None,
+            usage: Some(normalize_usage(&usage)),
+        });
     }
 
     Ok(())
