@@ -202,7 +202,6 @@ pub async fn chat_completions(
             upstream,
             &context,
         )
-        .await
     } else {
         let upstream_response = match state
             .gateway
@@ -302,14 +301,14 @@ fn json_chat_completion_response(
     response
 }
 
-async fn stream_chat_completion_response(
+fn stream_chat_completion_response(
     completion_id: &str,
     model: String,
     upstream: ChatCompletionStream,
     context: &RequestContext,
 ) -> Response {
-    let events = build_stream_events(completion_id, model, upstream).await;
-    let mut response = Sse::new(stream::iter(events)).into_response();
+    let events = build_stream_events(completion_id, model, upstream, context);
+    let mut response = Sse::new(events).into_response();
     attach_request_headers(&mut response, context);
     response.headers_mut().insert(
         header::CONTENT_TYPE,
@@ -318,30 +317,42 @@ async fn stream_chat_completion_response(
     response
 }
 
-async fn build_stream_events(
+fn build_stream_events(
     completion_id: &str,
     model: String,
     upstream: ChatCompletionStream,
-) -> Vec<Result<Event, Infallible>> {
-    let chunks: Vec<ChatStreamChunk> = upstream.collect().await;
-
-    let mut events = Vec::with_capacity(chunks.len() + 1);
+    context: &RequestContext,
+) -> impl futures_util::Stream<Item = Result<Event, Infallible>> + Send + 'static {
     let created = now_utc_epoch_seconds();
+    let completion_id = completion_id.to_string();
+    let context = context.clone();
+    let route_alias = model.clone();
 
-    for upstream_chunk in chunks {
-        let chunk = map_to_chat_completion_stream_response(
-            completion_id.to_string(),
-            model.clone(),
-            created,
-            upstream_chunk,
-        );
-        events.push(Ok(Event::default()
-            .json_data(chunk)
-            .expect("chat completion chunk should serialize")));
-    }
-
-    events.push(Ok(Event::default().data("[DONE]")));
-    events
+    upstream
+        .map(move |upstream_chunk| {
+            let event = match upstream_chunk {
+                Ok(upstream_chunk) => {
+                    let chunk = map_to_chat_completion_stream_response(
+                        completion_id.clone(),
+                        model.clone(),
+                        created,
+                        upstream_chunk,
+                    );
+                    Event::default()
+                        .json_data(chunk)
+                        .expect("chat completion chunk should serialize")
+                }
+                Err(error) => {
+                    let error = normalize_provider_error(error, &context, route_alias.clone());
+                    Event::default()
+                        .event("error")
+                        .json_data(ErrorEnvelope::from(&error))
+                        .expect("error envelope should serialize")
+                }
+            };
+            Ok(event)
+        })
+        .chain(stream::once(async { Ok(Event::default().data("[DONE]")) }))
 }
 
 fn map_to_chat_completion_response(
@@ -496,5 +507,40 @@ mod tests {
         assert_eq!(response.choices.len(), 1);
         assert_eq!(response.choices[0].message.content, "pong");
         assert_eq!(response.model, alias);
+    }
+
+    #[tokio::test]
+    async fn build_stream_events_emits_before_upstream_finishes() {
+        let (sender, receiver) = tokio::sync::mpsc::channel(2);
+        sender
+            .send(Ok(ChatStreamChunk {
+                index: 0,
+                delta: "hello".to_string(),
+                finish_reason: None,
+                usage: None,
+            }))
+            .await
+            .expect("send first upstream chunk");
+
+        let upstream = stream::unfold(receiver, |mut receiver| async {
+            receiver.recv().await.map(|item| (item, receiver))
+        })
+        .boxed();
+        let context = RequestContext::new();
+        let events = build_stream_events(
+            "chatcmpl-test",
+            "mizan-public-model".to_string(),
+            upstream,
+            &context,
+        );
+        futures_util::pin_mut!(events);
+
+        let first = tokio::time::timeout(std::time::Duration::from_millis(100), events.next())
+            .await
+            .expect("gateway should emit before upstream closes")
+            .expect("gateway stream should yield an event")
+            .expect("event should be infallible");
+
+        assert!(format!("{first:?}").contains("chat.completion.chunk"));
     }
 }

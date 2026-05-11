@@ -1,3 +1,5 @@
+use std::collections::VecDeque;
+
 use async_trait::async_trait;
 use futures_util::stream::BoxStream;
 use futures_util::{StreamExt, stream};
@@ -56,7 +58,7 @@ pub struct ProviderHealth {
     pub latency_ms: Option<u64>,
 }
 
-pub type ChatCompletionStream = BoxStream<'static, ChatStreamChunk>;
+pub type ChatCompletionStream = BoxStream<'static, AppResult<ChatStreamChunk>>;
 
 impl Default for ProviderHealth {
     fn default() -> Self {
@@ -83,12 +85,12 @@ pub trait ProviderAdapter: Send + Sync {
         request: ChatRequest,
     ) -> AppResult<ChatCompletionStream> {
         let response = self.chat_completions(context, request).await?;
-        Ok(stream::iter([ChatStreamChunk {
+        Ok(stream::iter([Ok(ChatStreamChunk {
             index: 0,
             delta: response.content,
             finish_reason: Some("stop".to_owned()),
             usage: response.usage,
-        }])
+        })])
         .boxed())
     }
 
@@ -176,18 +178,14 @@ impl ProviderAdapter for OpenAiCompatibleProvider {
     ) -> AppResult<ChatCompletionStream> {
         let upstream_response = self
             .send_chat_completion_request(context, &request, true)
-            .await?
-            .text()
-            .await
-            .map_err(|error| {
-                AppError::infrastructure(format!(
-                    "upstream chat completion stream read failed: {error}"
-                ))
-            })?;
+            .await?;
 
-        let parsed = parse_stream_events(&upstream_response)?;
-
-        Ok(stream::iter(parsed).boxed())
+        Ok(stream_sse_chunks(
+            upstream_response
+                .bytes_stream()
+                .map(|result| result.map(|bytes| bytes.to_vec()))
+                .boxed(),
+        ))
     }
 
     async fn models(&self, _context: &RequestContext) -> AppResult<Vec<ProviderModel>> {
@@ -270,6 +268,7 @@ fn parse_chat_completion_response(
     })
 }
 
+#[cfg(test)]
 fn parse_stream_events(raw_body: &str) -> AppResult<Vec<ChatStreamChunk>> {
     let mut chunks = Vec::new();
     let mut event_data = String::new();
@@ -282,7 +281,7 @@ fn parse_stream_events(raw_body: &str) -> AppResult<Vec<ChatStreamChunk>> {
                 continue;
             }
 
-            append_stream_event(&mut chunks, &event_data)?;
+            chunks.extend(parse_stream_event(&event_data)?);
             event_data.clear();
             continue;
         }
@@ -293,12 +292,15 @@ fn parse_stream_events(raw_body: &str) -> AppResult<Vec<ChatStreamChunk>> {
         }
 
         if let Some(value) = trimmed.strip_prefix("data:") {
+            if !event_data.is_empty() {
+                event_data.push('\n');
+            }
             event_data.push_str(value.trim_start());
         }
     }
 
     if !event_data.trim().is_empty() {
-        append_stream_event(&mut chunks, &event_data)?;
+        chunks.extend(parse_stream_event(&event_data)?);
     }
 
     if chunks.is_empty() {
@@ -308,15 +310,154 @@ fn parse_stream_events(raw_body: &str) -> AppResult<Vec<ChatStreamChunk>> {
     Ok(chunks)
 }
 
-fn append_stream_event(chunks: &mut Vec<ChatStreamChunk>, raw_event_data: &str) -> AppResult<()> {
+fn stream_sse_chunks(
+    byte_stream: BoxStream<'static, Result<Vec<u8>, reqwest::Error>>,
+) -> ChatCompletionStream {
+    stream::unfold(SseStreamState::new(byte_stream), |mut state| async move {
+        if state.finished {
+            return None;
+        }
+
+        loop {
+            if let Some(next) = state.pending.pop_front() {
+                if next.is_ok() {
+                    state.emitted_any = true;
+                }
+                return Some((next, state));
+            }
+
+            if let Some(position) = state.line_buffer.iter().position(|byte| *byte == b'\n') {
+                let mut line = state.line_buffer.drain(..=position).collect::<Vec<_>>();
+                line.pop();
+                if line.last() == Some(&b'\r') {
+                    line.pop();
+                }
+
+                if let Err(error) = process_sse_line(&mut state, &line) {
+                    state.finished = true;
+                    return Some((Err(error), state));
+                }
+                continue;
+            }
+
+            match state.byte_stream.next().await {
+                Some(Ok(bytes)) => {
+                    state.line_buffer.extend(bytes);
+                }
+                Some(Err(error)) => {
+                    state.finished = true;
+                    return Some((
+                        Err(AppError::infrastructure(format!(
+                            "upstream chat completion stream read failed: {error}"
+                        ))),
+                        state,
+                    ));
+                }
+                None => {
+                    if !state.line_buffer.is_empty() {
+                        let line = std::mem::take(&mut state.line_buffer);
+                        if let Err(error) = process_sse_line(&mut state, &line) {
+                            state.finished = true;
+                            return Some((Err(error), state));
+                        }
+                    }
+
+                    if let Err(error) = flush_pending_sse_event(&mut state) {
+                        state.finished = true;
+                        return Some((Err(error), state));
+                    }
+
+                    if let Some(next) = state.pending.pop_front() {
+                        if next.is_ok() {
+                            state.emitted_any = true;
+                        }
+                        return Some((next, state));
+                    }
+
+                    state.finished = true;
+                    if !state.emitted_any {
+                        return Some((
+                            Err(AppError::provider("upstream stream response was empty")),
+                            state,
+                        ));
+                    }
+                    return None;
+                }
+            }
+        }
+    })
+    .boxed()
+}
+
+struct SseStreamState {
+    byte_stream: BoxStream<'static, Result<Vec<u8>, reqwest::Error>>,
+    line_buffer: Vec<u8>,
+    event_data: String,
+    pending: VecDeque<AppResult<ChatStreamChunk>>,
+    emitted_any: bool,
+    finished: bool,
+}
+
+impl SseStreamState {
+    fn new(byte_stream: BoxStream<'static, Result<Vec<u8>, reqwest::Error>>) -> Self {
+        Self {
+            byte_stream,
+            line_buffer: Vec::new(),
+            event_data: String::new(),
+            pending: VecDeque::new(),
+            emitted_any: false,
+            finished: false,
+        }
+    }
+}
+
+fn process_sse_line(state: &mut SseStreamState, raw_line: &[u8]) -> AppResult<()> {
+    let line = std::str::from_utf8(raw_line)
+        .map_err(|error| AppError::provider(format!("invalid upstream stream line: {error}")))?;
+
+    if line.is_empty() {
+        flush_pending_sse_event(state)?;
+        return Ok(());
+    }
+
+    let trimmed = line.trim_start();
+    if trimmed.starts_with(':') {
+        return Ok(());
+    }
+
+    if let Some(value) = trimmed.strip_prefix("data:") {
+        if !state.event_data.is_empty() {
+            state.event_data.push('\n');
+        }
+        state.event_data.push_str(value.trim_start());
+    }
+
+    Ok(())
+}
+
+fn flush_pending_sse_event(state: &mut SseStreamState) -> AppResult<()> {
+    if state.event_data.trim().is_empty() {
+        state.event_data.clear();
+        return Ok(());
+    }
+
+    let event_data = std::mem::take(&mut state.event_data);
+    state
+        .pending
+        .extend(parse_stream_event(&event_data)?.into_iter().map(Ok));
+    Ok(())
+}
+
+fn parse_stream_event(raw_event_data: &str) -> AppResult<Vec<ChatStreamChunk>> {
     let payload = raw_event_data.trim();
     if payload == "[DONE]" {
-        return Ok(());
+        return Ok(Vec::new());
     }
 
     let chunk: OpenAiChatCompletionChunk = serde_json::from_str(payload)
         .map_err(|error| AppError::provider(format!("invalid upstream stream payload: {error}")))?;
 
+    let mut chunks = Vec::new();
     for choice in chunk.choices {
         let delta = choice.delta.content.unwrap_or_default();
         if delta.is_empty() && choice.finish_reason.is_none() {
@@ -342,7 +483,7 @@ fn append_stream_event(chunks: &mut Vec<ChatStreamChunk>, raw_event_data: &str) 
         });
     }
 
-    Ok(())
+    Ok(chunks)
 }
 
 fn normalize_usage(raw_usage: &OpenAiTokenUsage) -> TokenUsage {
@@ -460,5 +601,43 @@ mod tests {
         assert!(chunks.len() >= 2);
         assert_eq!(chunks[0].delta, "Hello");
         assert_eq!(chunks[1].delta, " world");
+    }
+
+    #[test]
+    fn parse_stream_events_joins_repeated_data_fields_with_newlines() {
+        let raw_stream = "".to_string()
+            + "data: {\"id\":\"1\",\"model\":\"gpt-4o\",\n"
+            + "data: \"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"Hello\"},\"finish_reason\":\"stop\"}]}\n"
+            + "\n"
+            + "data: [DONE]\n";
+
+        let chunks = parse_stream_events(&raw_stream).expect("parse multi-line stream event");
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].delta, "Hello");
+        assert_eq!(chunks[0].finish_reason.as_deref(), Some("stop"));
+    }
+
+    #[tokio::test]
+    async fn stream_sse_chunks_emits_before_source_finishes() {
+        let first_event = "data: {\"id\":\"1\",\"model\":\"gpt-4o\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"Hello\"},\"finish_reason\":null}]}\n\n";
+        let (sender, receiver) = tokio::sync::mpsc::channel(2);
+        sender
+            .send(Ok(first_event.as_bytes().to_vec()))
+            .await
+            .expect("send first stream bytes");
+
+        let byte_stream = stream::unfold(receiver, |mut receiver| async {
+            receiver.recv().await.map(|item| (item, receiver))
+        })
+        .boxed();
+        let mut chunks = stream_sse_chunks(byte_stream);
+
+        let first = tokio::time::timeout(std::time::Duration::from_millis(100), chunks.next())
+            .await
+            .expect("stream should emit before source closes")
+            .expect("stream should yield a chunk")
+            .expect("chunk should parse");
+
+        assert_eq!(first.delta, "Hello");
     }
 }
