@@ -17,7 +17,7 @@ use mizan_core::{AppError, DatabaseBackend, ErrorEnvelope, RequestContext, Reque
 use mizan_providers::{ChatMessage, ChatRequest, ChatResponse, OpenAiCompatibleProvider};
 use serde::{Deserialize, Serialize};
 use sqlx::{AnyPool, query_as};
-use tracing::info;
+use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::AppState;
@@ -94,9 +94,21 @@ pub async fn chat_completions(
     headers: HeaderMap,
     Json(payload): Json<ChatCompletionsRequest>,
 ) -> GatewayHttpResult {
+    let request_id = parse_request_id_header(&headers, "x-request-id").unwrap_or_else(Uuid::now_v7);
+    let trace_id = parse_request_id_header(&headers, "x-trace-id").unwrap_or(request_id);
+
     let public_model = payload.model.trim();
+    let mut context = RequestContextBuilder::default()
+        .user_id(identity.user_id)
+        .api_key_id(identity.api_key_id)
+        .request_id(request_id)
+        .trace_id(trace_id)
+        .streaming(payload.stream)
+        .build();
+
     if public_model.is_empty() {
-        return Err((
+        return Ok(build_error_response(
+            &context,
             StatusCode::BAD_REQUEST,
             Json(ErrorEnvelope::from(&AppError::invalid_config(
                 "chat_completion.model",
@@ -105,20 +117,22 @@ pub async fn chat_completions(
         ));
     }
 
-    let request_id =
-        parse_request_id_header(&headers, "x-request-id")?.unwrap_or_else(Uuid::now_v7);
-    let trace_id = parse_request_id_header(&headers, "x-trace-id")?.unwrap_or(request_id);
-
-    let route = resolve_model_route(
+    let route = match resolve_model_route(
         &state.database,
         state.database_backend(),
         state.config.provider_secret_key.as_deref(),
         public_model,
     )
     .await
-    .map_err(from_app_error)?;
+    {
+        Ok(route) => route,
+        Err(error) => {
+            let (status, body) = from_app_error(error);
+            return Ok(build_error_response(&context, status, body));
+        }
+    };
 
-    let context = RequestContextBuilder::default()
+    context = RequestContextBuilder::default()
         .user_id(identity.user_id)
         .api_key_id(identity.api_key_id)
         .provider(route.provider_type.clone())
@@ -153,17 +167,21 @@ pub async fn chat_completions(
         "openai-compatible"
     };
     let provider = OpenAiCompatibleProvider::new(provider_name);
-    let upstream_response = state
+    let upstream_response = match state
         .gateway
         .chat_completions(&context, &provider, upstream_request)
         .await
-        .map_err(|error| {
-            from_app_error(normalize_provider_error(
+    {
+        Ok(upstream_response) => upstream_response,
+        Err(error) => {
+            let (status, body) = from_app_error(normalize_provider_error(
                 error,
                 &context,
                 public_model.to_string(),
-            ))
-        })?;
+            ));
+            return Ok(build_error_response(&context, status, body));
+        }
+    };
 
     let completion_id = format!("chatcmpl-{}", Uuid::now_v7());
     let response = if payload.stream {
@@ -180,31 +198,41 @@ pub async fn chat_completions(
     Ok(response)
 }
 
-fn parse_request_id_header(
-    headers: &HeaderMap,
-    header_name: &str,
-) -> Result<Option<Uuid>, (StatusCode, Json<ErrorEnvelope>)> {
+fn parse_request_id_header(headers: &HeaderMap, header_name: &str) -> Option<Uuid> {
     match headers.get(header_name) {
-        None => Ok(None),
+        None => None,
         Some(value) => {
-            let raw_value = value
-                .to_str()
-                .map_err(|_| map_invalid_request_id_error(header_name))?;
-            let parsed = Uuid::parse_str(raw_value)
-                .map_err(|_| map_invalid_request_id_error(header_name))?;
-            Ok(Some(parsed))
+            let raw_value = match value.to_str() {
+                Ok(value) => value,
+                Err(_) => {
+                    warn!(header_name, "invalid request id header bytes, ignoring");
+                    return None;
+                }
+            };
+
+            match Uuid::parse_str(raw_value) {
+                Ok(value) => Some(value),
+                Err(_) => {
+                    warn!(
+                        header_name,
+                        value = raw_value,
+                        "invalid request ID/trace ID header value, ignoring"
+                    );
+                    None
+                }
+            }
         }
     }
 }
 
-fn map_invalid_request_id_error(name: &str) -> (StatusCode, Json<ErrorEnvelope>) {
-    (
-        StatusCode::BAD_REQUEST,
-        Json(ErrorEnvelope::from(&AppError::invalid_config(
-            "request_id",
-            format!("{name} must be a valid UUID"),
-        ))),
-    )
+fn build_error_response(
+    context: &RequestContext,
+    status: StatusCode,
+    body: Json<ErrorEnvelope>,
+) -> Response {
+    let mut response = (status, body).into_response();
+    attach_request_headers(&mut response, context);
+    response
 }
 
 fn normalize_provider_error(

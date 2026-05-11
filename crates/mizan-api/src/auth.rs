@@ -290,11 +290,9 @@ pub async fn logout(
     .map_err(|error| AppError::infrastructure(error.to_string()))
     .map_err(from_app_error)?;
 
-    if result.rows_affected() == 0 {
-        return Err(map_error(StatusCode::UNAUTHORIZED, AppError::Unauthorized));
-    }
-
-    Ok(Json(SessionRevokeResponse { revoked: true }))
+    Ok(Json(SessionRevokeResponse {
+        revoked: result.rows_affected() > 0,
+    }))
 }
 
 pub async fn create_api_key(

@@ -53,7 +53,7 @@ Acceptance:
 
 ## Milestone 2 - Database Foundation
 
-Status: ✅ Implemented in current branch (`fda344c`)
+Status: ✅ Implemented
 
 First migration tables:
 
@@ -87,7 +87,7 @@ Acceptance:
 
 ## Milestone 3 - Auth and API Keys
 
-Status: ✅ Implemented in current branch (`0be31d6` + this pass)
+Status: ✅ Implemented
 
 Crates:
 

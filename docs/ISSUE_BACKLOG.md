@@ -23,7 +23,7 @@ This backlog is ordered for a fast backend-first MVP.
 
 ## Storage
 
-Status: ✅ Implemented in current branch (`fda344c`)
+Status: ✅ Implemented
 
 1. Add PostgreSQL migrations.
 2. Add migration runner.
@@ -34,7 +34,7 @@ Status: ✅ Implemented in current branch (`fda344c`)
 
 ## Auth
 
-Status: ✅ Implemented in current branch (`0be31d6` + this pass)
+Status: ✅ Implemented
 
 1. Add password hashing.
 2. Add user registration/login.
