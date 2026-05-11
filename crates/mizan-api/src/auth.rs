@@ -276,7 +276,7 @@ pub async fn logout(
     let token_hash = hash_value(raw_token);
     let updated_at = unix_timestamp_string();
 
-    let revoked = query(&prepare_sql(
+    let result = query(&prepare_sql(
         backend,
         "UPDATE sessions
          SET revoked = 1,
@@ -290,8 +290,12 @@ pub async fn logout(
     .map_err(|error| AppError::infrastructure(error.to_string()))
     .map_err(from_app_error)?;
 
+    if result.rows_affected() == 0 {
+        return Err(map_error(StatusCode::UNAUTHORIZED, AppError::Unauthorized));
+    }
+
     Ok(Json(SessionRevokeResponse {
-        revoked: revoked.rows_affected() == 1,
+        revoked: true,
     }))
 }
 
