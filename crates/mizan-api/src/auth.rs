@@ -294,9 +294,7 @@ pub async fn logout(
         return Err(map_error(StatusCode::UNAUTHORIZED, AppError::Unauthorized));
     }
 
-    Ok(Json(SessionRevokeResponse {
-        revoked: true,
-    }))
+    Ok(Json(SessionRevokeResponse { revoked: true }))
 }
 
 pub async fn create_api_key(

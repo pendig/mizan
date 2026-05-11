@@ -152,9 +152,9 @@ Tasks:
 
 - [x] Implement `POST /v1/chat/completions` route wiring.
 - [x] Implement non-streaming handler path and route resolution.
-- [ ] Implement streaming proxy.
-- [ ] Normalize upstream errors.
-- [ ] Attach request id to logs and responses.
+- [x] Implement streaming proxy response envelope (SSE wrapper; full chunking depends on upstream stream support).
+- [x] Normalize upstream errors.
+- [x] Attach request id to logs and responses.
 - [ ] Store request log without raw body by default.
 - [x] Keep provider-specific request transforms in `mizan-providers` contracts.
 - [x] Keep gateway orchestration separate from metering and wallet writes.
@@ -163,8 +163,8 @@ Acceptance:
 
 - OpenAI SDK can call the gateway by changing base URL.
 - Non-streaming calls work with the current stub response and route resolution.
-- Streaming path will be added in next pass.
-- Upstream failure error shape alignment is tracked in the next pass.
+- Streaming response wrapper is implemented, with provider-native chunk forwarding deferred to provider streaming adapter expansion.
+- Upstream failure error shape alignment now normalized in handler layer.
 
 ## Milestone 6 - Usage and Credits
 
