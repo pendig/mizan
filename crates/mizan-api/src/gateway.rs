@@ -328,31 +328,67 @@ fn build_stream_events(
     let context = context.clone();
     let route_alias = model.clone();
 
-    upstream
-        .map(move |upstream_chunk| {
-            let event = match upstream_chunk {
-                Ok(upstream_chunk) => {
-                    let chunk = map_to_chat_completion_stream_response(
-                        completion_id.clone(),
-                        model.clone(),
-                        created,
-                        upstream_chunk,
-                    );
-                    Event::default()
-                        .json_data(chunk)
-                        .expect("chat completion chunk should serialize")
+    struct StreamBuildState {
+        upstream: ChatCompletionStream,
+        completion_id: String,
+        model: String,
+        route_alias: String,
+        context: RequestContext,
+        created: i64,
+        emit_done: bool,
+    }
+
+    stream::unfold(
+        StreamBuildState {
+            upstream,
+            completion_id,
+            model,
+            route_alias,
+            context,
+            created,
+            emit_done: true,
+        },
+        |mut state| async move {
+            if !state.emit_done {
+                return None;
+            }
+
+            match state.upstream.next().await {
+                Some(upstream_chunk) => {
+                    let event = match upstream_chunk {
+                        Ok(upstream_chunk) => {
+                            let chunk = map_to_chat_completion_stream_response(
+                                state.completion_id.clone(),
+                                state.model.clone(),
+                                state.created,
+                                upstream_chunk,
+                            );
+                            Event::default()
+                                .json_data(chunk)
+                                .expect("chat completion chunk should serialize")
+                        }
+                        Err(error) => {
+                            state.emit_done = false;
+                            let error = normalize_provider_error(error, &state.context, state.route_alias.clone());
+                            Event::default()
+                                .event("error")
+                                .json_data(ErrorEnvelope::from(&error))
+                                .expect("error envelope should serialize")
+                        }
+                    };
+                    Some((Ok(event), state))
                 }
-                Err(error) => {
-                    let error = normalize_provider_error(error, &context, route_alias.clone());
-                    Event::default()
-                        .event("error")
-                        .json_data(ErrorEnvelope::from(&error))
-                        .expect("error envelope should serialize")
+                None => {
+                    if state.emit_done {
+                        state.emit_done = false;
+                        Some((Ok(Event::default().data("[DONE]")), state))
+                    } else {
+                        None
+                    }
                 }
-            };
-            Ok(event)
-        })
-        .chain(stream::once(async { Ok(Event::default().data("[DONE]")) }))
+            }
+        },
+    )
 }
 
 fn map_to_chat_completion_response(
