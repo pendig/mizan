@@ -1,4 +1,5 @@
 use std::convert::Infallible;
+use std::time::Instant;
 
 use axum::{
     Extension, Json,
@@ -18,6 +19,7 @@ use mizan_providers::{
     ChatCompletionStream, ChatMessage, ChatRequest, ChatResponse, ChatStreamChunk,
     OpenAiCompatibleProvider,
 };
+use mizan_wallet::RoutePrice;
 use serde::{Deserialize, Serialize};
 use sqlx::{AnyPool, query_as};
 use tracing::{info, warn};
@@ -25,6 +27,7 @@ use uuid::Uuid;
 
 use crate::AppState;
 use crate::auth::ApiKeyIdentity;
+use crate::billing;
 use crate::utils::{decrypt_provider_api_key, from_app_error, now_utc_epoch_seconds, prepare_sql};
 
 type GatewayHttpResult = Result<Response, (StatusCode, Json<ErrorEnvelope>)>;
@@ -91,6 +94,17 @@ struct ResolvedModelRoute {
     provider_type: String,
     provider_base_url: String,
     provider_api_key: String,
+    input_price_per_1m_tokens: i64,
+    output_price_per_1m_tokens: i64,
+}
+
+impl ResolvedModelRoute {
+    fn route_price(&self) -> RoutePrice {
+        RoutePrice {
+            input_microcredits_per_1m_tokens: self.input_price_per_1m_tokens,
+            output_microcredits_per_1m_tokens: self.output_price_per_1m_tokens,
+        }
+    }
 }
 
 pub async fn chat_completions(
@@ -101,6 +115,7 @@ pub async fn chat_completions(
 ) -> GatewayHttpResult {
     let request_id = parse_request_id_header(&headers, "x-request-id").unwrap_or_else(Uuid::now_v7);
     let trace_id = parse_request_id_header(&headers, "x-trace-id").unwrap_or(request_id);
+    let request_started_at = Instant::now();
 
     let public_model = payload.model.trim();
     let mut context = RequestContextBuilder::default()
@@ -165,6 +180,7 @@ pub async fn chat_completions(
         messages: payload.messages.clone(),
         stream: payload.stream,
     };
+    let request_messages = upstream_request.messages.clone();
 
     let completion_id = format!("chatcmpl-{}", Uuid::now_v7());
 
@@ -173,10 +189,11 @@ pub async fn chat_completions(
     } else {
         "openai-compatible".to_owned()
     };
+    let route_price = route.route_price();
     let provider = OpenAiCompatibleProvider::new(
         provider_name,
         route.provider_base_url,
-        route.provider_api_key,
+        route.provider_api_key.clone(),
     );
 
     let response = if payload.stream {
@@ -187,11 +204,33 @@ pub async fn chat_completions(
         {
             Ok(upstream) => upstream,
             Err(error) => {
-                let (status, body) = from_app_error(normalize_provider_error(
-                    error,
-                    &context,
-                    public_model.to_string(),
-                ));
+                let normalized_error =
+                    normalize_provider_error(error, &context, public_model.to_string());
+                let (status, body) = from_app_error(normalized_error);
+                if let Err(error) = billing::record_usage(
+                    &state.database,
+                    state.database_backend(),
+                    billing::BillingInput {
+                        request_id,
+                        user_id: identity.user_id,
+                        api_key_id: Some(identity.api_key_id),
+                        provider_id: Some(route.provider_connection_id),
+                        route_id: Some(route.id),
+                        model: public_model.to_string(),
+                        usage: billing::estimate_usage(&request_messages, ""),
+                        status_code: status.as_u16(),
+                        latency_ms: request_started_at.elapsed().as_millis() as u64,
+                        route_price,
+                    },
+                )
+                .await
+                {
+                    warn!(
+                        request_id = %request_id,
+                        error = %error,
+                        "failed to persist stream request usage for upstream stream init error"
+                    );
+                }
                 return Ok(build_error_response(&context, status, body));
             }
         };
@@ -200,7 +239,16 @@ pub async fn chat_completions(
             &completion_id,
             public_model.to_string(),
             upstream,
+            request_messages.clone(),
             &context,
+            state.database.clone(),
+            state.database_backend(),
+            route_price,
+            identity.user_id,
+            Some(identity.api_key_id),
+            route.provider_connection_id,
+            route.id,
+            request_started_at,
         )
     } else {
         let upstream_response = match state
@@ -210,14 +258,63 @@ pub async fn chat_completions(
         {
             Ok(upstream_response) => upstream_response,
             Err(error) => {
-                let (status, body) = from_app_error(normalize_provider_error(
-                    error,
-                    &context,
-                    public_model.to_string(),
-                ));
+                let normalized_error =
+                    normalize_provider_error(error, &context, public_model.to_string());
+                let (status, body) = from_app_error(normalized_error);
+                if let Err(error) = billing::record_usage(
+                    &state.database,
+                    state.database_backend(),
+                    billing::BillingInput {
+                        request_id,
+                        user_id: identity.user_id,
+                        api_key_id: Some(identity.api_key_id),
+                        provider_id: Some(route.provider_connection_id),
+                        route_id: Some(route.id),
+                        model: public_model.to_string(),
+                        usage: billing::estimate_usage(&request_messages, ""),
+                        status_code: status.as_u16(),
+                        latency_ms: request_started_at.elapsed().as_millis() as u64,
+                        route_price,
+                    },
+                )
+                .await
+                {
+                    warn!(
+                        request_id = %request_id,
+                        error = %error,
+                        "failed to persist non-stream request usage for upstream error"
+                    );
+                }
                 return Ok(build_error_response(&context, status, body));
             }
         };
+
+        let usage = upstream_response.usage.unwrap_or_else(|| {
+            billing::estimate_usage(&request_messages, &upstream_response.content)
+        });
+        let latency_ms = request_started_at.elapsed().as_millis() as u64;
+
+        if let Err(error) = billing::record_usage(
+            &state.database,
+            state.database_backend(),
+            billing::BillingInput {
+                request_id,
+                user_id: identity.user_id,
+                api_key_id: Some(identity.api_key_id),
+                provider_id: Some(route.provider_connection_id),
+                route_id: Some(route.id),
+                model: public_model.to_string(),
+                usage,
+                status_code: StatusCode::OK.as_u16(),
+                latency_ms,
+                route_price,
+            },
+        )
+        .await
+        {
+            let (status, body) = from_app_error(error);
+            return Ok(build_error_response(&context, status, body));
+        }
 
         json_chat_completion_response(
             &completion_id,
@@ -285,6 +382,21 @@ fn normalize_provider_error(
     }
 }
 
+fn app_error_status_code(error: &AppError) -> StatusCode {
+    match error {
+        AppError::InvalidConfig { .. } => StatusCode::BAD_REQUEST,
+        AppError::NotFound(_) => StatusCode::NOT_FOUND,
+        AppError::Unauthorized => StatusCode::UNAUTHORIZED,
+        AppError::Forbidden => StatusCode::FORBIDDEN,
+        AppError::Provider(_) => StatusCode::BAD_GATEWAY,
+        AppError::LimitExceeded(_) => StatusCode::TOO_MANY_REQUESTS,
+        AppError::InsufficientCredit => StatusCode::PAYMENT_REQUIRED,
+        AppError::Config { .. } | AppError::Infrastructure(_) | AppError::Io(_) => {
+            StatusCode::INTERNAL_SERVER_ERROR
+        }
+    }
+}
+
 fn json_chat_completion_response(
     completion_id: &str,
     model: String,
@@ -305,9 +417,32 @@ fn stream_chat_completion_response(
     completion_id: &str,
     model: String,
     upstream: ChatCompletionStream,
+    request_messages: Vec<ChatMessage>,
     context: &RequestContext,
+    database: AnyPool,
+    database_backend: DatabaseBackend,
+    route_price: RoutePrice,
+    user_id: Uuid,
+    api_key_id: Option<Uuid>,
+    provider_id: Uuid,
+    route_id: Uuid,
+    request_started_at: Instant,
 ) -> Response {
-    let events = build_stream_events(completion_id, model, upstream, context);
+    let events = build_stream_events(
+        completion_id,
+        model,
+        upstream,
+        request_messages,
+        context,
+        database,
+        database_backend,
+        route_price,
+        user_id,
+        api_key_id,
+        provider_id,
+        route_id,
+        request_started_at,
+    );
     let mut response = Sse::new(events).into_response();
     attach_request_headers(&mut response, context);
     response.headers_mut().insert(
@@ -321,7 +456,16 @@ fn build_stream_events(
     completion_id: &str,
     model: String,
     upstream: ChatCompletionStream,
+    request_messages: Vec<ChatMessage>,
     context: &RequestContext,
+    database: AnyPool,
+    database_backend: DatabaseBackend,
+    route_price: RoutePrice,
+    user_id: Uuid,
+    api_key_id: Option<Uuid>,
+    provider_id: Uuid,
+    route_id: Uuid,
+    request_started_at: Instant,
 ) -> impl futures_util::Stream<Item = Result<Event, Infallible>> + Send + 'static {
     let created = now_utc_epoch_seconds();
     let completion_id = completion_id.to_string();
@@ -334,7 +478,17 @@ fn build_stream_events(
         model: String,
         route_alias: String,
         context: RequestContext,
+        request_messages: Vec<ChatMessage>,
+        latest_usage: Option<mizan_providers::TokenUsage>,
         created: i64,
+        start: Instant,
+        route_price: RoutePrice,
+        user_id: Uuid,
+        api_key_id: Option<Uuid>,
+        provider_id: Uuid,
+        route_id: Uuid,
+        database: AnyPool,
+        database_backend: DatabaseBackend,
         emit_done: bool,
     }
 
@@ -345,7 +499,17 @@ fn build_stream_events(
             model,
             route_alias,
             context,
+            request_messages,
+            latest_usage: None,
             created,
+            start: request_started_at,
+            route_price,
+            user_id,
+            api_key_id,
+            provider_id,
+            route_id,
+            database,
+            database_backend,
             emit_done: true,
         },
         |mut state| async move {
@@ -357,6 +521,10 @@ fn build_stream_events(
                 Some(upstream_chunk) => {
                     let event = match upstream_chunk {
                         Ok(upstream_chunk) => {
+                            if let Some(usage) = upstream_chunk.usage.clone() {
+                                state.latest_usage = Some(usage);
+                            }
+
                             let chunk = map_to_chat_completion_stream_response(
                                 state.completion_id.clone(),
                                 state.model.clone(),
@@ -369,7 +537,40 @@ fn build_stream_events(
                         }
                         Err(error) => {
                             state.emit_done = false;
-                            let error = normalize_provider_error(error, &state.context, state.route_alias.clone());
+                            let error = normalize_provider_error(
+                                error,
+                                &state.context,
+                                state.route_alias.clone(),
+                            );
+                            let status = app_error_status_code(&error);
+                            let usage = state.latest_usage.take().unwrap_or_else(|| {
+                                billing::estimate_usage(&state.request_messages, "")
+                            });
+                            let latency_ms = state.start.elapsed().as_millis() as u64;
+                            if let Err(error) = billing::record_usage(
+                                &state.database,
+                                state.database_backend,
+                                billing::BillingInput {
+                                    request_id: state.context.request_id,
+                                    user_id: state.user_id,
+                                    api_key_id: state.api_key_id,
+                                    provider_id: Some(state.provider_id),
+                                    route_id: Some(state.route_id),
+                                    model: state.model.clone(),
+                                    usage,
+                                    status_code: status.as_u16(),
+                                    latency_ms,
+                                    route_price: state.route_price,
+                                },
+                            )
+                            .await
+                            {
+                                warn!(
+                                    request_id = %state.context.request_id,
+                                    error = %error,
+                                    "failed to persist stream request usage after stream chunk error"
+                                );
+                            }
                             Event::default()
                                 .event("error")
                                 .json_data(ErrorEnvelope::from(&error))
@@ -381,6 +582,34 @@ fn build_stream_events(
                 None => {
                     if state.emit_done {
                         state.emit_done = false;
+                        let usage = state.latest_usage.take().unwrap_or_else(|| {
+                            billing::estimate_usage(&state.request_messages, "")
+                        });
+                        let latency_ms = state.start.elapsed().as_millis() as u64;
+                        if let Err(error) = billing::record_usage(
+                            &state.database,
+                            state.database_backend,
+                            billing::BillingInput {
+                                request_id: state.context.request_id,
+                                user_id: state.user_id,
+                                api_key_id: state.api_key_id,
+                                provider_id: Some(state.provider_id),
+                                route_id: Some(state.route_id),
+                                model: state.model.clone(),
+                                usage,
+                                status_code: StatusCode::OK.as_u16(),
+                                latency_ms,
+                                route_price: state.route_price,
+                            },
+                        )
+                        .await
+                        {
+                            warn!(
+                                request_id = %state.context.request_id,
+                                error = %error,
+                                "failed to persist stream request usage"
+                            );
+                        }
                         Some((Ok(Event::default().data("[DONE]")), state))
                     } else {
                         None
@@ -457,28 +686,31 @@ async fn resolve_model_route(
     provider_secret_key: Option<&str>,
     public_model: &str,
 ) -> Result<ResolvedModelRoute, AppError> {
-    let resolved = query_as::<_, (String, String, String, String, String, String)>(&prepare_sql(
-        database_backend,
-        "SELECT mr.id,
+    let resolved =
+        query_as::<_, (String, String, String, String, String, String, i64, i64)>(&prepare_sql(
+            database_backend,
+            "SELECT mr.id,
                 mr.upstream_model,
                 pc.provider_type,
                 pc.id,
                 pc.base_url,
-                pc.api_key_encrypted
+                pc.api_key_encrypted,
+                mr.pricing_input_per_1m_tokens,
+                mr.pricing_output_per_1m_tokens
          FROM model_routes mr
          INNER JOIN provider_connections pc
             ON pc.id = mr.provider_connection_id
          WHERE mr.public_model = ? AND mr.enabled = ? AND pc.enabled = ?",
-    ))
-    .bind(public_model)
-    .bind(1)
-    .bind(1)
-    .fetch_optional(database)
-    .await
-    .map_err(|error| AppError::infrastructure(error.to_string()))?
-    .ok_or_else(|| {
-        AppError::invalid_config("chat_completion.model", "model not found or disabled")
-    })?;
+        ))
+        .bind(public_model)
+        .bind(1)
+        .bind(1)
+        .fetch_optional(database)
+        .await
+        .map_err(|error| AppError::infrastructure(error.to_string()))?
+        .ok_or_else(|| {
+            AppError::invalid_config("chat_completion.model", "model not found or disabled")
+        })?;
 
     let (
         route_id,
@@ -487,6 +719,8 @@ async fn resolve_model_route(
         provider_connection_id,
         provider_base_url,
         encrypted_api_key,
+        input_price_per_1m_tokens,
+        output_price_per_1m_tokens,
     ) = resolved;
     let id = Uuid::parse_str(&route_id).map_err(|error| {
         AppError::infrastructure(format!("stored route id is invalid: {error}"))
@@ -515,6 +749,8 @@ async fn resolve_model_route(
         provider_type: provider_type.trim().to_string(),
         provider_base_url,
         provider_api_key,
+        input_price_per_1m_tokens,
+        output_price_per_1m_tokens,
     })
 }
 
@@ -563,11 +799,27 @@ mod tests {
         })
         .boxed();
         let context = RequestContext::new();
+        let database = sqlx::any::AnyPoolOptions::new()
+            .connect("sqlite::memory:")
+            .await
+            .expect("create sqlite test database");
         let events = build_stream_events(
             "chatcmpl-test",
             "mizan-public-model".to_string(),
             upstream,
+            vec![],
             &context,
+            database,
+            DatabaseBackend::Sqlite,
+            RoutePrice {
+                input_microcredits_per_1m_tokens: 0,
+                output_microcredits_per_1m_tokens: 0,
+            },
+            Uuid::now_v7(),
+            Some(Uuid::now_v7()),
+            Uuid::now_v7(),
+            Uuid::now_v7(),
+            Instant::now(),
         );
         futures_util::pin_mut!(events);
 
