@@ -115,7 +115,7 @@ Acceptance:
 
 ## Milestone 4 - Provider and Route Management
 
-Status: ✅ Implemented in current branch and PR #33
+Status: ✅ Implemented
 
 Crates:
 
@@ -141,7 +141,7 @@ Acceptance:
 
 ## Milestone 5 - Chat Completions Gateway
 
-Status: ✅ POST `/v1/chat/completions` implemented with OpenAI-compatible streaming chunk forwarding
+Status: ✅ Implemented
 
 Crates:
 

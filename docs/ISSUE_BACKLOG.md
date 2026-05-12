@@ -45,7 +45,7 @@ Status: ✅ Implemented
 
 ## Provider Routing
 
-Progress status (current): Milestone 4 done in PR #33 with non-streaming chat proxy follow-up in same PR.
+Progress status (current): Milestone 4 completed with non-streaming chat proxy follow-up.
 
 1. Add provider connection CRUD.
 2. Add OpenAI-compatible provider adapter.

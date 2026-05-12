@@ -78,7 +78,7 @@ Exit criteria:
 
 ## Phase 3 - Provider Connections and Model Routes
 
-Status: ✅ Implemented in PR #33
+Status: ✅ Implemented
 
 Deliverables:
 
@@ -95,7 +95,7 @@ Exit criteria:
 
 ## Phase 4 - Gateway Proxy
 
-Status: ✅ Implemented in milestone 4 (PR #33)
+Status: ✅ Implemented in milestone 4
 
 Deliverables:
 
