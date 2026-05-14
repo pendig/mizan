@@ -1,5 +1,5 @@
 use mizan_core::{AppResult, RequestContext};
-use mizan_providers::{ChatRequest, ChatResponse, ProviderAdapter};
+use mizan_providers::{ChatCompletionStream, ChatRequest, ChatResponse, ProviderAdapter};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -26,5 +26,14 @@ impl Gateway {
         request: ChatRequest,
     ) -> AppResult<ChatResponse> {
         provider.chat_completions(context, request).await
+    }
+
+    pub async fn chat_completions_stream(
+        &self,
+        context: &RequestContext,
+        provider: &dyn ProviderAdapter,
+        request: ChatRequest,
+    ) -> AppResult<ChatCompletionStream> {
+        provider.chat_completions_stream(context, request).await
     }
 }

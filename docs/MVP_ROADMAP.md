@@ -78,7 +78,7 @@ Exit criteria:
 
 ## Phase 3 - Provider Connections and Model Routes
 
-Status: ✅ Implemented in PR #33
+Status: ✅ Implemented
 
 Deliverables:
 
@@ -95,21 +95,21 @@ Exit criteria:
 
 ## Phase 4 - Gateway Proxy
 
-Status: ✅ Partially implemented in PR #33
+Status: ✅ Implemented in milestone 4
 
 Deliverables:
 
-- `POST /v1/chat/completions` (non-streaming path implemented).
-- Streaming path (open in next milestone).
-- Upstream error normalization (open in next milestone).
-- Request id propagation (open in next milestone).
+- `POST /v1/chat/completions` with non-streaming response mapping implemented.
+- Streaming response path in HTTP/SSE implemented and forwards parsed OpenAI-compatible upstream chunks.
+- Upstream provider errors normalized into stable API envelope.
+- Request/Trace IDs propagated from request headers and included in response headers.
 - Basic provider health status.
 - Provider transforms, routing, and gateway orchestration stay separate.
 
 Exit criteria:
 
 - OpenAI SDK can call the gateway by changing only base URL and API key.
-- Streaming path works after milestone 5 follow-up.
+- Streaming response format aligns with SSE `chat.completion.chunk` envelope with provider-native chunk forwarding for OpenAI-compatible providers.
 
 ## Phase 5 - Usage Metering and Credits
 

@@ -50,6 +50,16 @@ pub struct RequestContextBuilder {
 }
 
 impl RequestContextBuilder {
+    pub fn request_id(mut self, request_id: Uuid) -> Self {
+        self.context.request_id = request_id;
+        self
+    }
+
+    pub fn trace_id(mut self, trace_id: Uuid) -> Self {
+        self.context.trace_id = trace_id;
+        self
+    }
+
     pub fn user_id(mut self, user_id: Uuid) -> Self {
         self.context.user_id = Some(user_id);
         self

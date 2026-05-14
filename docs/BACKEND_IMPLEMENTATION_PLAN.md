@@ -53,6 +53,8 @@ Acceptance:
 
 ## Milestone 2 - Database Foundation
 
+Status: ✅ Implemented
+
 First migration tables:
 
 - `users`
@@ -85,6 +87,8 @@ Acceptance:
 
 ## Milestone 3 - Auth and API Keys
 
+Status: ✅ Implemented
+
 Crates:
 
 - `crates/mizan-core`
@@ -111,7 +115,7 @@ Acceptance:
 
 ## Milestone 4 - Provider and Route Management
 
-Status: ✅ Implemented in current branch and PR #33
+Status: ✅ Implemented
 
 Crates:
 
@@ -137,7 +141,7 @@ Acceptance:
 
 ## Milestone 5 - Chat Completions Gateway
 
-Status: ✅ Non-streaming handler implemented, streaming upstream path still pending
+Status: ✅ Implemented
 
 Crates:
 
@@ -148,9 +152,9 @@ Tasks:
 
 - [x] Implement `POST /v1/chat/completions` route wiring.
 - [x] Implement non-streaming handler path and route resolution.
-- [ ] Implement streaming proxy.
-- [ ] Normalize upstream errors.
-- [ ] Attach request id to logs and responses.
+- [x] Implement streaming proxy response envelope and upstream chunk forwarding for OpenAI-compatible providers.
+- [x] Normalize upstream errors.
+- [x] Attach request id to logs and responses.
 - [ ] Store request log without raw body by default.
 - [x] Keep provider-specific request transforms in `mizan-providers` contracts.
 - [x] Keep gateway orchestration separate from metering and wallet writes.
@@ -158,9 +162,9 @@ Tasks:
 Acceptance:
 
 - OpenAI SDK can call the gateway by changing base URL.
-- Non-streaming calls work with the current stub response and route resolution.
-- Streaming path will be added in next pass.
-- Upstream failure error shape alignment is tracked in the next pass.
+- Non-streaming and streaming calls resolve model routes and call provider adapters.
+- Streaming now returns upstream chunk events as SSE `chat.completion.chunk`.
+- Upstream failure error shape alignment now normalized in handler layer.
 
 ## Milestone 6 - Usage and Credits
 

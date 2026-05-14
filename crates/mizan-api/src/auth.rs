@@ -87,6 +87,11 @@ pub struct ApiKeyRevokeResponse {
     pub api_key_id: Uuid,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct SessionRevokeResponse {
+    pub revoked: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct ApiKeyIdentity {
     pub api_key_id: Uuid,
@@ -258,6 +263,35 @@ pub async fn login(
         expires_at: session.expires_at,
         user_id: user.id,
         role: user.role,
+    }))
+}
+
+pub async fn logout(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> AuthHttpResult<Json<SessionRevokeResponse>> {
+    let backend = state.database_backend();
+    let raw_token = session_token_from_headers(&headers)
+        .ok_or_else(|| map_error(StatusCode::UNAUTHORIZED, AppError::Unauthorized))?;
+    let token_hash = hash_value(raw_token);
+    let updated_at = unix_timestamp_string();
+
+    let result = query(&prepare_sql(
+        backend,
+        "UPDATE sessions
+         SET revoked = 1,
+             updated_at = ?
+         WHERE session_token_hash = ? AND revoked = 0",
+    ))
+    .bind(updated_at)
+    .bind(token_hash)
+    .execute(&state.database)
+    .await
+    .map_err(|error| AppError::infrastructure(error.to_string()))
+    .map_err(from_app_error)?;
+
+    Ok(Json(SessionRevokeResponse {
+        revoked: result.rows_affected() > 0,
     }))
 }
 
