@@ -516,7 +516,7 @@ fn build_stream_events(
                 Some(upstream_chunk) => {
                     let event = match upstream_chunk {
                         Ok(upstream_chunk) => {
-                            if let Some(usage) = upstream_chunk.usage.clone() {
+                            if let Some(usage) = upstream_chunk.usage {
                                 state.latest_usage = Some(usage);
                             }
 

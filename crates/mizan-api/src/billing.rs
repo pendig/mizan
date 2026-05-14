@@ -714,7 +714,7 @@ fn ceil_divide(dividend: u64, divisor: u64) -> u64 {
         return 0;
     }
 
-    (dividend + divisor - 1) / divisor
+    dividend.div_ceil(divisor)
 }
 
 #[cfg(test)]
@@ -729,7 +729,7 @@ mod tests {
         }];
 
         let usage = estimate_usage(&prompt, "hi there");
-        assert_eq!(usage.estimated, true);
+        assert!(usage.estimated);
         assert_eq!(usage.prompt_tokens, 3);
         assert_eq!(usage.completion_tokens, 2);
         assert_eq!(usage.total_tokens, 5);
