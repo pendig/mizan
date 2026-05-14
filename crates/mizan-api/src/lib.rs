@@ -17,6 +17,7 @@ use tower_http::trace::TraceLayer;
 use tracing::{info, warn};
 
 mod auth;
+mod billing;
 mod gateway;
 mod providers;
 mod storage;
@@ -183,13 +184,29 @@ pub fn router(state: AppState) -> Router {
         .merge(public_models_router)
         .merge(provider_admin_router);
 
+    let billing_router = Router::new()
+        .route("/v1/credits", get(billing::get_wallet))
+        .route("/v1/usage", get(billing::list_usage))
+        .route_layer(from_fn_with_state(state.clone(), auth::api_key_auth));
+
+    let billing_admin_router = Router::new()
+        .route(
+            "/admin/users/{id}/credits/grant",
+            post(billing::grant_credits),
+        )
+        .route("/admin/usage", get(billing::list_usage_admin))
+        .route_layer(from_fn(providers::require_admin_role))
+        .route_layer(from_fn_with_state(state.clone(), auth::api_key_auth));
+
     Router::new()
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
         .merge(public_auth_router)
         .merge(session_router)
         .merge(api_key_router)
+        .merge(billing_router)
         .merge(provider_router)
+        .merge(billing_admin_router)
         .fallback(not_found)
         .layer(TraceLayer::new_for_http())
         .with_state(state)

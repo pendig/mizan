@@ -22,4 +22,6 @@ tracing.workspace = true
 uuid.workspace = true
 mizan-core = { path = "../mizan-core" }
 mizan-gateway = { path = "../mizan-gateway" }
+mizan-metering = { path = "../mizan-metering" }
 mizan-providers = { path = "../mizan-providers" }
+mizan-wallet = { path = "../mizan-wallet" }
