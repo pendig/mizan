@@ -1,4 +1,5 @@
 use std::collections::VecDeque;
+use std::sync::LazyLock;
 
 use async_trait::async_trait;
 use futures_util::stream::BoxStream;
@@ -106,10 +107,14 @@ pub struct OpenAiCompatibleProvider {
     name: String,
     base_url: String,
     api_key: String,
-    client: Client,
 }
 
 impl OpenAiCompatibleProvider {
+    fn http_client() -> &'static Client {
+        static CLIENT: LazyLock<Client> = LazyLock::new(Client::new);
+        &CLIENT
+    }
+
     pub fn new(
         name: impl Into<String>,
         base_url: impl Into<String>,
@@ -119,7 +124,6 @@ impl OpenAiCompatibleProvider {
             name: name.into(),
             base_url: base_url.into().trim().trim_end_matches('/').to_string(),
             api_key: api_key.into(),
-            client: Client::new(),
         }
     }
 
@@ -215,7 +219,9 @@ impl OpenAiCompatibleProvider {
 
         let response = self
             .with_api_request_headers(
-                self.client.post(self.chat_completion_url()).json(&payload),
+                Self::http_client()
+                    .post(self.chat_completion_url())
+                    .json(&payload),
                 &context.request_id.to_string(),
             )
             .send()
@@ -252,13 +258,16 @@ fn parse_chat_completion_response(
             ))
         })?;
 
-    let mut content = String::new();
-    if let Some(first_choice) = response.choices.into_iter().next() {
-        content = first_choice
-            .message
-            .and_then(|message| message.content)
-            .unwrap_or_default();
-    }
+    let Some(first_choice) = response.choices.into_iter().next() else {
+        return Err(AppError::provider(
+            "upstream chat completion response returned no choices",
+        ));
+    };
+
+    let content = first_choice
+        .message
+        .and_then(|message| message.content)
+        .unwrap_or_default();
 
     Ok(ChatResponse {
         provider: provider_name,
@@ -587,6 +596,33 @@ mod tests {
         assert_eq!(parsed.content, "hello");
         assert!(parsed.usage.is_some());
         assert_eq!(parsed.usage.unwrap().total_tokens, 12);
+    }
+
+    #[test]
+    fn parse_non_stream_response_rejects_empty_choices() {
+        let raw_response = r#"
+        {
+            "id": "chatcmpl-2",
+            "object": "chat.completion",
+            "model": "gpt-4o-mini",
+            "choices": [],
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 0,
+                "total_tokens": 10,
+                "estimated": false
+            }
+        }
+        "#;
+
+        assert!(
+            parse_chat_completion_response(
+                raw_response,
+                "mizan/public-gpt".to_owned(),
+                "openai".to_owned(),
+            )
+            .is_err()
+        );
     }
 
     #[test]

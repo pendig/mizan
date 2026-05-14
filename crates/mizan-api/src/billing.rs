@@ -8,7 +8,7 @@ use mizan_metering::UsageChargeInput;
 use mizan_providers::{ChatMessage, TokenUsage};
 use mizan_wallet::{RoutePrice, calculate_usage_charge};
 use serde::{Deserialize, Serialize};
-use sqlx::{Any, AnyPool, Transaction, query, query_as};
+use sqlx::{Any, AnyPool, FromRow, Transaction, query, query_as};
 use uuid::Uuid;
 
 use crate::AppState;
@@ -409,6 +409,24 @@ async fn list_usage_events(
     let limit = normalize_limit(limit)?;
     let offset = normalize_offset(offset);
 
+    #[derive(Debug, FromRow)]
+    struct UsageEventRow {
+        id: String,
+        request_id: String,
+        user_id: Option<String>,
+        api_key_id: Option<String>,
+        provider_id: Option<String>,
+        route_id: Option<String>,
+        model: String,
+        usage_prompt_tokens: i64,
+        usage_completion_tokens: i64,
+        usage_total_tokens: i64,
+        usage_estimated: i64,
+        status_code: i64,
+        latency_ms: i64,
+        created_at: String,
+    }
+
     let sql = if user_id_filter.is_some() {
         "SELECT id, request_id, user_id, api_key_id, provider_id, route_id, model,\
              usage_prompt_tokens, usage_completion_tokens, usage_total_tokens, usage_estimated,\
@@ -426,85 +444,40 @@ async fn list_usage_events(
              LIMIT ? OFFSET ?"
     };
 
-    let rows = if let Some(user_id) = user_id_filter {
-        query_as::<
-            _,
-            (
-                String,
-                String,
-                Option<String>,
-                Option<String>,
-                Option<String>,
-                Option<String>,
-                String,
-                i64,
-                i64,
-                i64,
-                i64,
-                i64,
-                i64,
-                String,
-            ),
-        >(&prepare_sql(database_backend, sql))
-        .bind(user_id.to_string())
+    let prepared_sql = prepare_sql(database_backend, sql);
+    let mut query = query_as::<_, UsageEventRow>(&prepared_sql);
+    if let Some(user_id) = user_id_filter {
+        query = query.bind(user_id.to_string());
+    }
+
+    let rows = query
         .bind(limit)
         .bind(offset)
         .fetch_all(database)
         .await
-        .map_err(|error| AppError::infrastructure(error.to_string()))?
-    } else {
-        query_as::<
-            _,
-            (
-                String,
-                String,
-                Option<String>,
-                Option<String>,
-                Option<String>,
-                Option<String>,
-                String,
-                i64,
-                i64,
-                i64,
-                i64,
-                i64,
-                i64,
-                String,
-            ),
-        >(&prepare_sql(database_backend, sql))
-        .bind(limit)
-        .bind(offset)
-        .fetch_all(database)
-        .await
-        .map_err(|error| AppError::infrastructure(error.to_string()))?
-    };
+        .map_err(|error| AppError::infrastructure(error.to_string()))?;
 
     rows.into_iter()
         .map(|row| -> AppResult<UsageEventResponse> {
-            let usage_prompt_tokens = to_u64(row.7)?;
-            let usage_completion_tokens = to_u64(row.8)?;
-            let usage_total_tokens = to_u64(row.9)?;
-            let latency_ms = to_u64(row.12)?;
-
             Ok(UsageEventResponse {
-                id: Uuid::parse_str(&row.0).map_err(|error| {
+                id: Uuid::parse_str(&row.id).map_err(|error| {
                     AppError::infrastructure(format!("invalid usage event id: {error}"))
                 })?,
-                request_id: Uuid::parse_str(&row.1).map_err(|error| {
+                request_id: Uuid::parse_str(&row.request_id).map_err(|error| {
                     AppError::infrastructure(format!("invalid request id in usage event: {error}"))
                 })?,
-                user_id: parse_optional_uuid(row.2.as_ref())?,
-                api_key_id: parse_optional_uuid(row.3.as_ref())?,
-                provider_id: parse_optional_uuid(row.4.as_ref())?,
-                route_id: parse_optional_uuid(row.5.as_ref())?,
-                model: row.6,
-                usage_prompt_tokens,
-                usage_completion_tokens,
-                usage_total_tokens,
-                usage_estimated: row.10 != 0,
-                status_code: to_status_code(row.11)?,
-                latency_ms,
-                created_at: row.13,
+                user_id: parse_optional_uuid(row.user_id.as_ref())?,
+                api_key_id: parse_optional_uuid(row.api_key_id.as_ref())?,
+                provider_id: parse_optional_uuid(row.provider_id.as_ref())?,
+                route_id: parse_optional_uuid(row.route_id.as_ref())?,
+                model: row.model,
+                usage_prompt_tokens: to_u64(row.usage_prompt_tokens)?,
+                usage_completion_tokens: to_u64(row.usage_completion_tokens)?,
+                usage_total_tokens: to_u64(row.usage_total_tokens)?,
+                usage_estimated: row.usage_estimated != 0,
+                status_code: to_status_code(row.status_code)?,
+                latency_ms: to_u64(row.latency_ms)?,
+                created_at: row.created_at,
             })
         })
         .collect::<AppResult<Vec<_>>>()
@@ -564,24 +537,42 @@ async fn ensure_wallet_in_tx(
 
     let wallet_id = Uuid::now_v7();
     let now = unix_timestamp_string();
+    let insert_sql = match database_backend {
+        DatabaseBackend::Sqlite => {
+            "INSERT INTO wallets (id, owner_user_id, balance_microcredits, created_at, updated_at) \
+             VALUES (?, ?, 0, ?, ?) ON CONFLICT(owner_user_id) DO NOTHING"
+        }
+        DatabaseBackend::Postgres => {
+            "INSERT INTO wallets (id, owner_user_id, balance_microcredits, created_at, updated_at) \
+             VALUES (?, ?, 0, ?, ?) ON CONFLICT(owner_user_id) DO NOTHING"
+        }
+    };
 
-    query(&prepare_sql(
-        database_backend,
-        "INSERT INTO wallets (id, owner_user_id, balance_microcredits, created_at, updated_at) \
-         VALUES (?, ?, 0, ?, ?)",
-    ))
-    .bind(wallet_id.to_string())
-    .bind(user_id.to_string())
-    .bind(&now)
-    .bind(&now)
-    .execute(&mut *connection)
-    .await
-    .map_err(|error| AppError::infrastructure(format!("cannot initialize wallet: {error}")))?;
+    query(&prepare_sql(database_backend, insert_sql))
+        .bind(wallet_id.to_string())
+        .bind(user_id.to_string())
+        .bind(&now)
+        .bind(&now)
+        .execute(&mut *connection)
+        .await
+        .map_err(|error| AppError::infrastructure(format!("cannot initialize wallet: {error}")))?;
+
+    let existing = query_as::<_, (String, i64)>(&prepare_sql(database_backend, lock_sql))
+        .bind(user_id.to_string())
+        .fetch_optional(&mut *connection)
+        .await
+        .map_err(|error| AppError::infrastructure(error.to_string()))?
+        .ok_or_else(|| {
+            AppError::infrastructure("wallet initialization did not result in a wallet row")
+        })?;
+    let (id, balance_microcredits) = existing;
+    let id = Uuid::parse_str(&id)
+        .map_err(|error| AppError::infrastructure(format!("invalid wallet id: {error}")))?;
 
     Ok(WalletRow {
-        id: wallet_id,
+        id,
         owner_user_id: user_id,
-        balance_microcredits: 0,
+        balance_microcredits,
     })
 }
 

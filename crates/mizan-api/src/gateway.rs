@@ -21,7 +21,7 @@ use mizan_providers::{
 };
 use mizan_wallet::RoutePrice;
 use serde::{Deserialize, Serialize};
-use sqlx::{AnyPool, query_as};
+use sqlx::{AnyPool, FromRow, query_as};
 use tracing::{info, warn};
 use uuid::Uuid;
 
@@ -197,6 +197,17 @@ pub async fn chat_completions(
     );
 
     let response = if payload.stream {
+        let billing_context = StreamBillingContext {
+            request_started_at,
+            database: state.database.clone(),
+            database_backend: state.database_backend(),
+            route_price,
+            user_id: identity.user_id,
+            api_key_id: Some(identity.api_key_id),
+            provider_id: route.provider_connection_id,
+            route_id: route.id,
+        };
+
         let upstream = match state
             .gateway
             .chat_completions_stream(&context, &provider, upstream_request)
@@ -241,14 +252,7 @@ pub async fn chat_completions(
             upstream,
             request_messages.clone(),
             &context,
-            state.database.clone(),
-            state.database_backend(),
-            route_price,
-            identity.user_id,
-            Some(identity.api_key_id),
-            route.provider_connection_id,
-            route.id,
-            request_started_at,
+            billing_context,
         )
     } else {
         let upstream_response = match state
@@ -419,14 +423,7 @@ fn stream_chat_completion_response(
     upstream: ChatCompletionStream,
     request_messages: Vec<ChatMessage>,
     context: &RequestContext,
-    database: AnyPool,
-    database_backend: DatabaseBackend,
-    route_price: RoutePrice,
-    user_id: Uuid,
-    api_key_id: Option<Uuid>,
-    provider_id: Uuid,
-    route_id: Uuid,
-    request_started_at: Instant,
+    billing_context: StreamBillingContext,
 ) -> Response {
     let events = build_stream_events(
         completion_id,
@@ -434,14 +431,7 @@ fn stream_chat_completion_response(
         upstream,
         request_messages,
         context,
-        database,
-        database_backend,
-        route_price,
-        user_id,
-        api_key_id,
-        provider_id,
-        route_id,
-        request_started_at,
+        billing_context,
     );
     let mut response = Sse::new(events).into_response();
     attach_request_headers(&mut response, context);
@@ -452,12 +442,9 @@ fn stream_chat_completion_response(
     response
 }
 
-fn build_stream_events(
-    completion_id: &str,
-    model: String,
-    upstream: ChatCompletionStream,
-    request_messages: Vec<ChatMessage>,
-    context: &RequestContext,
+#[derive(Debug, Clone)]
+struct StreamBillingContext {
+    request_started_at: Instant,
     database: AnyPool,
     database_backend: DatabaseBackend,
     route_price: RoutePrice,
@@ -465,7 +452,15 @@ fn build_stream_events(
     api_key_id: Option<Uuid>,
     provider_id: Uuid,
     route_id: Uuid,
-    request_started_at: Instant,
+}
+
+fn build_stream_events(
+    completion_id: &str,
+    model: String,
+    upstream: ChatCompletionStream,
+    request_messages: Vec<ChatMessage>,
+    context: &RequestContext,
+    billing_context: StreamBillingContext,
 ) -> impl futures_util::Stream<Item = Result<Event, Infallible>> + Send + 'static {
     let created = now_utc_epoch_seconds();
     let completion_id = completion_id.to_string();
@@ -481,7 +476,7 @@ fn build_stream_events(
         request_messages: Vec<ChatMessage>,
         latest_usage: Option<mizan_providers::TokenUsage>,
         created: i64,
-        start: Instant,
+        request_started_at: Instant,
         route_price: RoutePrice,
         user_id: Uuid,
         api_key_id: Option<Uuid>,
@@ -502,14 +497,14 @@ fn build_stream_events(
             request_messages,
             latest_usage: None,
             created,
-            start: request_started_at,
-            route_price,
-            user_id,
-            api_key_id,
-            provider_id,
-            route_id,
-            database,
-            database_backend,
+            request_started_at: billing_context.request_started_at,
+            route_price: billing_context.route_price,
+            user_id: billing_context.user_id,
+            api_key_id: billing_context.api_key_id,
+            provider_id: billing_context.provider_id,
+            route_id: billing_context.route_id,
+            database: billing_context.database,
+            database_backend: billing_context.database_backend,
             emit_done: true,
         },
         |mut state| async move {
@@ -546,7 +541,7 @@ fn build_stream_events(
                             let usage = state.latest_usage.take().unwrap_or_else(|| {
                                 billing::estimate_usage(&state.request_messages, "")
                             });
-                            let latency_ms = state.start.elapsed().as_millis() as u64;
+                            let latency_ms = state.request_started_at.elapsed().as_millis() as u64;
                             if let Err(error) = billing::record_usage(
                                 &state.database,
                                 state.database_backend,
@@ -570,6 +565,13 @@ fn build_stream_events(
                                     error = %error,
                                     "failed to persist stream request usage after stream chunk error"
                                 );
+                                return Some((
+                                    Ok(Event::default()
+                                        .event("error")
+                                        .json_data(ErrorEnvelope::from(&error))
+                                        .expect("error envelope should serialize")),
+                                    state,
+                                ));
                             }
                             Event::default()
                                 .event("error")
@@ -585,7 +587,7 @@ fn build_stream_events(
                         let usage = state.latest_usage.take().unwrap_or_else(|| {
                             billing::estimate_usage(&state.request_messages, "")
                         });
-                        let latency_ms = state.start.elapsed().as_millis() as u64;
+                        let latency_ms = state.request_started_at.elapsed().as_millis() as u64;
                         if let Err(error) = billing::record_usage(
                             &state.database,
                             state.database_backend,
@@ -609,6 +611,13 @@ fn build_stream_events(
                                 error = %error,
                                 "failed to persist stream request usage"
                             );
+                            return Some((
+                                Ok(Event::default()
+                                    .event("error")
+                                    .json_data(ErrorEnvelope::from(&error))
+                                    .expect("error envelope should serialize")),
+                                state,
+                            ));
                         }
                         Some((Ok(Event::default().data("[DONE]")), state))
                     } else {
@@ -686,42 +695,54 @@ async fn resolve_model_route(
     provider_secret_key: Option<&str>,
     public_model: &str,
 ) -> Result<ResolvedModelRoute, AppError> {
-    let resolved =
-        query_as::<_, (String, String, String, String, String, String, i64, i64)>(&prepare_sql(
-            database_backend,
-            "SELECT mr.id,
+    #[derive(Debug, FromRow)]
+    struct ResolvedModelRouteRow {
+        #[sqlx(rename = "route_id")]
+        id: String,
+        upstream_model: String,
+        provider_type: String,
+        #[sqlx(rename = "provider_connection_id")]
+        provider_connection_id: String,
+        provider_base_url: String,
+        #[sqlx(rename = "provider_api_key_encrypted")]
+        provider_api_key_encrypted: String,
+        input_price_per_1m_tokens: i64,
+        output_price_per_1m_tokens: i64,
+    }
+
+    let resolved = query_as::<_, ResolvedModelRouteRow>(&prepare_sql(
+        database_backend,
+        "SELECT mr.id AS route_id,
                 mr.upstream_model,
                 pc.provider_type,
-                pc.id,
+                pc.id AS provider_connection_id,
                 pc.base_url,
-                pc.api_key_encrypted,
+                pc.api_key_encrypted AS provider_api_key_encrypted,
                 mr.pricing_input_per_1m_tokens,
                 mr.pricing_output_per_1m_tokens
          FROM model_routes mr
          INNER JOIN provider_connections pc
             ON pc.id = mr.provider_connection_id
          WHERE mr.public_model = ? AND mr.enabled = ? AND pc.enabled = ?",
-        ))
-        .bind(public_model)
-        .bind(1)
-        .bind(1)
-        .fetch_optional(database)
-        .await
-        .map_err(|error| AppError::infrastructure(error.to_string()))?
-        .ok_or_else(|| {
-            AppError::invalid_config("chat_completion.model", "model not found or disabled")
-        })?;
+    ))
+    .bind(public_model)
+    .bind(1)
+    .bind(1)
+    .fetch_optional(database)
+    .await
+    .map_err(|error| AppError::infrastructure(error.to_string()))?
+    .ok_or_else(|| {
+        AppError::invalid_config("chat_completion.model", "model not found or disabled")
+    })?;
 
-    let (
-        route_id,
-        upstream_model,
-        provider_type,
-        provider_connection_id,
-        provider_base_url,
-        encrypted_api_key,
-        input_price_per_1m_tokens,
-        output_price_per_1m_tokens,
-    ) = resolved;
+    let route_id = resolved.id;
+    let upstream_model = resolved.upstream_model;
+    let provider_type = resolved.provider_type;
+    let provider_connection_id = resolved.provider_connection_id;
+    let provider_base_url = resolved.provider_base_url;
+    let encrypted_api_key = resolved.provider_api_key_encrypted;
+    let input_price_per_1m_tokens = resolved.input_price_per_1m_tokens;
+    let output_price_per_1m_tokens = resolved.output_price_per_1m_tokens;
     let id = Uuid::parse_str(&route_id).map_err(|error| {
         AppError::infrastructure(format!("stored route id is invalid: {error}"))
     })?;
@@ -809,17 +830,19 @@ mod tests {
             upstream,
             vec![],
             &context,
-            database,
-            DatabaseBackend::Sqlite,
-            RoutePrice {
-                input_microcredits_per_1m_tokens: 0,
-                output_microcredits_per_1m_tokens: 0,
+            StreamBillingContext {
+                request_started_at: Instant::now(),
+                database,
+                database_backend: DatabaseBackend::Sqlite,
+                route_price: RoutePrice {
+                    input_microcredits_per_1m_tokens: 0,
+                    output_microcredits_per_1m_tokens: 0,
+                },
+                user_id: Uuid::now_v7(),
+                api_key_id: Some(Uuid::now_v7()),
+                provider_id: Uuid::now_v7(),
+                route_id: Uuid::now_v7(),
             },
-            Uuid::now_v7(),
-            Some(Uuid::now_v7()),
-            Uuid::now_v7(),
-            Uuid::now_v7(),
-            Instant::now(),
         );
         futures_util::pin_mut!(events);
 
@@ -830,5 +853,50 @@ mod tests {
             .expect("event should be infallible");
 
         assert!(format!("{first:?}").contains("chat.completion.chunk"));
+    }
+
+    #[tokio::test]
+    async fn build_stream_events_does_not_emit_done_after_stream_error() {
+        let upstream = stream::iter([Err(AppError::provider("stream failure"))]).boxed();
+        let context = RequestContext::new();
+        let database = sqlx::any::AnyPoolOptions::new()
+            .connect("sqlite::memory:")
+            .await
+            .expect("create sqlite test database");
+        let events = build_stream_events(
+            "chatcmpl-error",
+            "mizan-public-model".to_string(),
+            upstream,
+            vec![],
+            &context,
+            StreamBillingContext {
+                request_started_at: Instant::now(),
+                database,
+                database_backend: DatabaseBackend::Sqlite,
+                route_price: RoutePrice {
+                    input_microcredits_per_1m_tokens: 0,
+                    output_microcredits_per_1m_tokens: 0,
+                },
+                user_id: Uuid::now_v7(),
+                api_key_id: Some(Uuid::now_v7()),
+                provider_id: Uuid::now_v7(),
+                route_id: Uuid::now_v7(),
+            },
+        );
+        futures_util::pin_mut!(events);
+
+        let first = tokio::time::timeout(std::time::Duration::from_millis(100), events.next())
+            .await
+            .expect("gateway should emit stream error event")
+            .expect("gateway stream should yield an event")
+            .expect("event should be infallible");
+
+        assert!(format!("{first:?}").contains("error"));
+
+        let second = tokio::time::timeout(std::time::Duration::from_millis(100), events.next())
+            .await
+            .expect("stream should finish after error");
+
+        assert!(second.is_none());
     }
 }
