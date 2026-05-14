@@ -369,7 +369,11 @@ fn build_stream_events(
                         }
                         Err(error) => {
                             state.emit_done = false;
-                            let error = normalize_provider_error(error, &state.context, state.route_alias.clone());
+                            let error = normalize_provider_error(
+                                error,
+                                &state.context,
+                                state.route_alias.clone(),
+                            );
                             Event::default()
                                 .event("error")
                                 .json_data(ErrorEnvelope::from(&error))
