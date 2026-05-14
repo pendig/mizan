@@ -779,6 +779,15 @@ async fn resolve_model_route(
 mod tests {
     use super::*;
 
+    async fn sqlite_test_database() -> AnyPool {
+        sqlx::any::install_default_drivers();
+        sqlx::any::AnyPoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("create sqlite test database")
+    }
+
     #[test]
     fn map_to_chat_completion_response_uses_model_and_content() {
         let upstream_model = "openai/gpt-4o-mini".to_string();
@@ -820,10 +829,7 @@ mod tests {
         })
         .boxed();
         let context = RequestContext::new();
-        let database = sqlx::any::AnyPoolOptions::new()
-            .connect("sqlite::memory:")
-            .await
-            .expect("create sqlite test database");
+        let database = sqlite_test_database().await;
         let events = build_stream_events(
             "chatcmpl-test",
             "mizan-public-model".to_string(),
@@ -859,10 +865,7 @@ mod tests {
     async fn build_stream_events_does_not_emit_done_after_stream_error() {
         let upstream = stream::iter([Err(AppError::provider("stream failure"))]).boxed();
         let context = RequestContext::new();
-        let database = sqlx::any::AnyPoolOptions::new()
-            .connect("sqlite::memory:")
-            .await
-            .expect("create sqlite test database");
+        let database = sqlite_test_database().await;
         let events = build_stream_events(
             "chatcmpl-error",
             "mizan-public-model".to_string(),
