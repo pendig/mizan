@@ -156,8 +156,10 @@ Choose one lean path:
 Recommended for fastest MVP:
 
 - Backend API first.
+- API-only admin/user workflow with scripts for alpha.
 - Minimal admin/user web UI after the gateway is proven.
 - Do not build UI until the modular backend shape is stable.
+- Use [Alpha Runbook](ALPHA_RUNBOOK.md) as the contributor-facing alpha surface.
 
 Exit criteria:
 

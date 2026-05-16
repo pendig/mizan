@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlx::{AnyPool, Row, query, query_as};
 use tokio::task;
-use tracing::warn;
+use tracing::{Instrument, info_span, warn};
 use uuid::Uuid;
 
 use crate::AppState;
@@ -371,7 +371,9 @@ pub async fn api_key_auth(
         .ok_or_else(|| map_error(StatusCode::UNAUTHORIZED, AppError::Unauthorized))?;
 
     let identity =
-        resolve_api_key_identity(&state.database, state.database_backend(), authorization).await?;
+        resolve_api_key_identity(&state.database, state.database_backend(), authorization)
+            .instrument(info_span!("api_key_auth"))
+            .await?;
     request.extensions_mut().insert(identity);
     Ok(next.run(request).await)
 }

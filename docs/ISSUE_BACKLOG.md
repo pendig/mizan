@@ -92,3 +92,4 @@ Progress status (current): Milestone 4 completed with non-streaming chat proxy f
 4. Add token and credit counters.
 5. Add latency histograms.
 6. Propagate request and trace context through all layers.
+7. Keep alpha validation scriptable through `docs/ALPHA_RUNBOOK.md`.

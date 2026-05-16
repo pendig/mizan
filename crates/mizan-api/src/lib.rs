@@ -1,9 +1,9 @@
 use axum::{
     Json, Router,
     extract::State,
-    http::StatusCode,
+    http::{StatusCode, header},
     middleware::{from_fn, from_fn_with_state},
-    response::IntoResponse,
+    response::{IntoResponse, Response},
     routing::{delete, get, post},
 };
 use mizan_core::{AppConfig, AppError, AppResult, DatabaseBackend, ErrorEnvelope, init_tracing};
@@ -19,6 +19,7 @@ use tracing::{info, warn};
 mod auth;
 mod billing;
 mod gateway;
+mod metrics;
 mod providers;
 mod storage;
 mod utils;
@@ -29,6 +30,7 @@ pub struct AppState {
     pub gateway: Gateway,
     pub database: AnyPool,
     pub redis: RedisClient,
+    pub metrics: metrics::MetricsRegistry,
 }
 
 impl AppState {
@@ -48,6 +50,7 @@ impl AppState {
             gateway: Gateway::new(),
             database,
             redis,
+            metrics: metrics::MetricsRegistry::default(),
         };
 
         if let (Some(email), Some(password)) = (
@@ -201,6 +204,7 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
+        .route("/metrics", get(metrics_endpoint))
         .merge(public_auth_router)
         .merge(session_router)
         .merge(api_key_router)
@@ -210,6 +214,15 @@ pub fn router(state: AppState) -> Router {
         .fallback(not_found)
         .layer(TraceLayer::new_for_http())
         .with_state(state)
+}
+
+async fn metrics_endpoint(State(state): State<AppState>) -> Response {
+    let mut response = state.metrics.render_prometheus().into_response();
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("text/plain; version=0.0.4"),
+    );
+    response
 }
 
 async fn healthz() -> Json<HealthResponse> {
