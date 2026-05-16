@@ -14,7 +14,10 @@ use axum::{
     },
 };
 use futures_util::{StreamExt, stream};
-use mizan_core::{AppError, DatabaseBackend, ErrorEnvelope, RequestContext, RequestContextBuilder};
+use mizan_core::{
+    AppError, DatabaseBackend, ErrorEnvelope, RequestContext, RequestContextBuilder,
+    redact_for_logs,
+};
 use mizan_limits::{LimitScope, RuntimeLimitLease, RuntimeLimitPolicy, RuntimeLimitRequest};
 use mizan_providers::{
     ChatCompletionStream, ChatMessage, ChatRequest, ChatResponse, ChatStreamChunk,
@@ -24,12 +27,13 @@ use mizan_wallet::RoutePrice;
 use serde::{Deserialize, Serialize};
 use sqlx::{AnyPool, FromRow, query_as};
 use tokio::task;
-use tracing::{info, warn};
+use tracing::{Instrument, info, info_span, warn};
 use uuid::Uuid;
 
 use crate::AppState;
 use crate::auth::ApiKeyIdentity;
 use crate::billing;
+use crate::metrics::{GatewayObservation, MetricsRegistry};
 use crate::utils::{decrypt_provider_api_key, from_app_error, now_utc_epoch_seconds, prepare_sql};
 
 type GatewayHttpResult = Result<Response, (StatusCode, Json<ErrorEnvelope>)>;
@@ -148,6 +152,12 @@ pub async fn chat_completions(
         state.config.provider_secret_key.as_deref(),
         public_model,
     )
+    .instrument(info_span!(
+        "route_resolution",
+        request_id = %request_id,
+        trace_id = %trace_id,
+        route = %public_model,
+    ))
     .await
     {
         Ok(route) => route,
@@ -219,6 +229,12 @@ pub async fn chat_completions(
         admission_usage,
         route_price,
     )
+    .instrument(info_span!(
+        "credit_preflight",
+        request_id = %context.request_id,
+        trace_id = %context.trace_id,
+        route = %public_model,
+    ))
     .await
     {
         let (status, body) = from_app_error(error);
@@ -246,6 +262,15 @@ pub async fn chat_completions(
                 "failed to persist insufficient-credit preflight usage"
             );
         }
+        observe_gateway_metrics(
+            &state.metrics,
+            &context,
+            public_model,
+            prompt_only_usage,
+            status,
+            request_started_at.elapsed().as_millis() as u64,
+            route_price,
+        );
         return Ok(build_error_response(&context, status, body));
     }
 
@@ -259,11 +284,26 @@ pub async fn chat_completions(
         ],
         estimated_total_tokens,
     )
+    .instrument(info_span!(
+        "runtime_limits",
+        request_id = %context.request_id,
+        trace_id = %context.trace_id,
+        route = %public_model,
+    ))
     .await
     {
         Ok(lease) => lease,
         Err(error) => {
             let (status, body) = from_app_error(error);
+            observe_gateway_metrics(
+                &state.metrics,
+                &context,
+                public_model,
+                admission_usage,
+                status,
+                request_started_at.elapsed().as_millis() as u64,
+                route_price,
+            );
             return Ok(build_error_response(&context, status, body));
         }
     };
@@ -279,11 +319,20 @@ pub async fn chat_completions(
             provider_id: route.provider_connection_id,
             route_id: route.id,
             limit_lease: Some(limit_lease),
+            metrics: state.metrics.clone(),
         };
 
         let upstream = match state
             .gateway
             .chat_completions_stream(&context, &provider, upstream_request)
+            .instrument(info_span!(
+                "provider_stream_call",
+                request_id = %context.request_id,
+                trace_id = %context.trace_id,
+                route = %public_model,
+                provider = %context.provider.clone().unwrap_or_default(),
+                model = %context.model.clone().unwrap_or_default(),
+            ))
             .await
         {
             Ok(upstream) => upstream,
@@ -291,6 +340,8 @@ pub async fn chat_completions(
                 let normalized_error =
                     normalize_provider_error(error, &context, public_model.to_string());
                 let (status, body) = from_app_error(normalized_error);
+                let usage = billing::estimate_usage(&request_messages, "");
+                let latency_ms = request_started_at.elapsed().as_millis() as u64;
                 if let Err(error) = billing::record_usage(
                     &state.database,
                     state.database_backend(),
@@ -301,12 +352,19 @@ pub async fn chat_completions(
                         provider_id: Some(route.provider_connection_id),
                         route_id: Some(route.id),
                         model: public_model.to_string(),
-                        usage: billing::estimate_usage(&request_messages, ""),
+                        usage,
                         status_code: status.as_u16(),
-                        latency_ms: request_started_at.elapsed().as_millis() as u64,
+                        latency_ms,
                         route_price,
                     },
                 )
+                .instrument(info_span!(
+                    "metering",
+                    request_id = %context.request_id,
+                    trace_id = %context.trace_id,
+                    route = %public_model,
+                    status = status.as_u16(),
+                ))
                 .await
                 {
                     warn!(
@@ -315,6 +373,15 @@ pub async fn chat_completions(
                         "failed to persist stream request usage for upstream stream init error"
                     );
                 }
+                observe_gateway_metrics(
+                    &state.metrics,
+                    &context,
+                    public_model,
+                    usage,
+                    status,
+                    latency_ms,
+                    route_price,
+                );
                 release_limit_lease(billing_context.limit_lease);
                 return Ok(build_error_response(&context, status, body));
             }
@@ -332,6 +399,14 @@ pub async fn chat_completions(
         let upstream_response = match state
             .gateway
             .chat_completions(&context, &provider, upstream_request)
+            .instrument(info_span!(
+                "provider_call",
+                request_id = %context.request_id,
+                trace_id = %context.trace_id,
+                route = %public_model,
+                provider = %context.provider.clone().unwrap_or_default(),
+                model = %context.model.clone().unwrap_or_default(),
+            ))
             .await
         {
             Ok(upstream_response) => upstream_response,
@@ -339,6 +414,8 @@ pub async fn chat_completions(
                 let normalized_error =
                     normalize_provider_error(error, &context, public_model.to_string());
                 let (status, body) = from_app_error(normalized_error);
+                let usage = billing::estimate_usage(&request_messages, "");
+                let latency_ms = request_started_at.elapsed().as_millis() as u64;
                 if let Err(error) = billing::record_usage(
                     &state.database,
                     state.database_backend(),
@@ -349,12 +426,19 @@ pub async fn chat_completions(
                         provider_id: Some(route.provider_connection_id),
                         route_id: Some(route.id),
                         model: public_model.to_string(),
-                        usage: billing::estimate_usage(&request_messages, ""),
+                        usage,
                         status_code: status.as_u16(),
-                        latency_ms: request_started_at.elapsed().as_millis() as u64,
+                        latency_ms,
                         route_price,
                     },
                 )
+                .instrument(info_span!(
+                    "metering",
+                    request_id = %context.request_id,
+                    trace_id = %context.trace_id,
+                    route = %public_model,
+                    status = status.as_u16(),
+                ))
                 .await
                 {
                     warn!(
@@ -363,6 +447,15 @@ pub async fn chat_completions(
                         "failed to persist non-stream request usage for upstream error"
                     );
                 }
+                observe_gateway_metrics(
+                    &state.metrics,
+                    &context,
+                    public_model,
+                    usage,
+                    status,
+                    latency_ms,
+                    route_price,
+                );
                 release_limit_lease(Some(limit_lease));
                 return Ok(build_error_response(&context, status, body));
             }
@@ -389,13 +482,38 @@ pub async fn chat_completions(
                 route_price,
             },
         )
+        .instrument(info_span!(
+            "metering",
+            request_id = %context.request_id,
+            trace_id = %context.trace_id,
+            route = %public_model,
+            status = StatusCode::OK.as_u16(),
+        ))
         .await
         {
             let (status, body) = from_app_error(error);
+            observe_gateway_metrics(
+                &state.metrics,
+                &context,
+                public_model,
+                usage,
+                status,
+                latency_ms,
+                route_price,
+            );
             release_limit_lease(Some(limit_lease));
             return Ok(build_error_response(&context, status, body));
         }
 
+        observe_gateway_metrics(
+            &state.metrics,
+            &context,
+            public_model,
+            usage,
+            StatusCode::OK,
+            latency_ms,
+            route_price,
+        );
         let response = json_chat_completion_response(
             &completion_id,
             public_model.to_string(),
@@ -445,6 +563,35 @@ fn release_limit_lease(lease: Option<RuntimeLimitLease>) {
         if let Err(error) = lease.release() {
             warn!(error = %error, "failed to release runtime limit lease");
         }
+    });
+}
+
+fn observe_gateway_metrics(
+    metrics: &MetricsRegistry,
+    context: &RequestContext,
+    route_alias: &str,
+    usage: mizan_providers::TokenUsage,
+    status: StatusCode,
+    latency_ms: u64,
+    route_price: RoutePrice,
+) {
+    metrics.observe_gateway(GatewayObservation {
+        route: context
+            .route
+            .clone()
+            .unwrap_or_else(|| route_alias.to_string()),
+        provider: context
+            .provider
+            .clone()
+            .unwrap_or_else(|| "unknown".to_string()),
+        model: context
+            .model
+            .clone()
+            .unwrap_or_else(|| "unknown".to_string()),
+        status: status.as_u16(),
+        usage,
+        latency_ms,
+        route_price,
     });
 }
 
@@ -524,12 +671,12 @@ fn normalize_provider_error(
     let provider = context.provider.as_deref().unwrap_or("unknown");
     let request_id = context.request_id;
     match error {
-        AppError::Infrastructure(message) => AppError::Provider(format!(
+        AppError::Infrastructure(message) => AppError::Provider(redact_for_logs(format!(
             "upstream transport failure route={route_alias} provider={provider} request_id={request_id}: {message}"
-        )),
-        AppError::Provider(message) => AppError::Provider(format!(
+        ))),
+        AppError::Provider(message) => AppError::Provider(redact_for_logs(format!(
             "upstream provider error route={route_alias} provider={provider} request_id={request_id}: {message}"
-        )),
+        ))),
         other => other,
     }
 }
@@ -601,6 +748,7 @@ struct StreamBillingContext {
     provider_id: Uuid,
     route_id: Uuid,
     limit_lease: Option<RuntimeLimitLease>,
+    metrics: MetricsRegistry,
 }
 
 fn build_stream_events(
@@ -635,6 +783,7 @@ fn build_stream_events(
         database_backend: DatabaseBackend,
         emit_done: bool,
         limit_lease: Option<RuntimeLimitLease>,
+        metrics: MetricsRegistry,
     }
 
     impl Drop for StreamBuildState {
@@ -663,6 +812,7 @@ fn build_stream_events(
             database_backend: billing_context.database_backend,
             emit_done: true,
             limit_lease: billing_context.limit_lease,
+            metrics: billing_context.metrics,
         },
         |mut state| async move {
             if !state.emit_done {
@@ -715,6 +865,13 @@ fn build_stream_events(
                                     route_price: state.route_price,
                                 },
                             )
+                            .instrument(info_span!(
+                                "metering",
+                                request_id = %state.context.request_id,
+                                trace_id = %state.context.trace_id,
+                                route = %state.route_alias,
+                                status = status.as_u16(),
+                            ))
                             .await
                             {
                                 warn!(
@@ -731,6 +888,15 @@ fn build_stream_events(
                                     state,
                                 ));
                             }
+                            observe_gateway_metrics(
+                                &state.metrics,
+                                &state.context,
+                                &state.route_alias,
+                                usage,
+                                status,
+                                latency_ms,
+                                state.route_price,
+                            );
                             release_limit_lease(state.limit_lease.take());
                             Event::default()
                                 .event("error")
@@ -763,6 +929,13 @@ fn build_stream_events(
                                 route_price: state.route_price,
                             },
                         )
+                        .instrument(info_span!(
+                            "metering",
+                            request_id = %state.context.request_id,
+                            trace_id = %state.context.trace_id,
+                            route = %state.route_alias,
+                            status = StatusCode::OK.as_u16(),
+                        ))
                         .await
                         {
                             warn!(
@@ -779,6 +952,15 @@ fn build_stream_events(
                                 state,
                             ));
                         }
+                        observe_gateway_metrics(
+                            &state.metrics,
+                            &state.context,
+                            &state.route_alias,
+                            usage,
+                            StatusCode::OK,
+                            latency_ms,
+                            state.route_price,
+                        );
                         release_limit_lease(state.limit_lease.take());
                         Some((Ok(Event::default().data("[DONE]")), state))
                     } else {
@@ -1061,6 +1243,7 @@ mod tests {
                 provider_id: Uuid::now_v7(),
                 route_id: Uuid::now_v7(),
                 limit_lease: None,
+                metrics: MetricsRegistry::default(),
             },
         );
         futures_util::pin_mut!(events);
@@ -1098,6 +1281,7 @@ mod tests {
                 provider_id: Uuid::now_v7(),
                 route_id: Uuid::now_v7(),
                 limit_lease: None,
+                metrics: MetricsRegistry::default(),
             },
         );
         futures_util::pin_mut!(events);
@@ -1175,6 +1359,7 @@ mod tests {
                 provider_id: scope_id,
                 route_id: Uuid::now_v7(),
                 limit_lease: Some(limit_lease),
+                metrics: MetricsRegistry::default(),
             },
         ));
 

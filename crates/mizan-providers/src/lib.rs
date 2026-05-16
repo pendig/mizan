@@ -4,7 +4,7 @@ use std::sync::LazyLock;
 use async_trait::async_trait;
 use futures_util::stream::BoxStream;
 use futures_util::{StreamExt, stream};
-use mizan_core::{AppError, AppResult, RequestContext};
+use mizan_core::{AppError, AppResult, RequestContext, redact_for_logs};
 use reqwest::Client;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderValue};
 use serde::{Deserialize, Serialize};
@@ -240,9 +240,9 @@ impl OpenAiCompatibleProvider {
                 .await
                 .unwrap_or_else(|_| "<failed to read upstream body>".to_owned());
 
-            return Err(AppError::provider(format!(
+            return Err(AppError::provider(redact_for_logs(format!(
                 "upstream provider returned status={status} body={body}"
-            )));
+            ))));
         }
 
         Ok(response)

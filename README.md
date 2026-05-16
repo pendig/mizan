@@ -44,6 +44,7 @@ accounting unit used by the gateway to meter and control usage.
 - [MVP Roadmap](docs/MVP_ROADMAP.md)
 - [Backend Implementation Plan](docs/BACKEND_IMPLEMENTATION_PLAN.md)
 - [Runtime Limit Testing](docs/LIMIT_TESTING.md)
+- [Alpha Runbook](docs/ALPHA_RUNBOOK.md)
 - [RTK Base Strategy](docs/RTK_BASE_STRATEGY.md)
 - [Research Notes](docs/RESEARCH.md)
 - [Name Options](docs/NAME_OPTIONS.md)
