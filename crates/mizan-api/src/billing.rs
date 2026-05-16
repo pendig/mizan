@@ -344,6 +344,33 @@ pub async fn record_usage(
     Ok(())
 }
 
+pub async fn ensure_sufficient_credit(
+    database: &AnyPool,
+    database_backend: DatabaseBackend,
+    user_id: Uuid,
+    usage: TokenUsage,
+    route_price: RoutePrice,
+) -> AppResult<()> {
+    let charge = calculate_usage_charge(
+        UsageChargeInput {
+            prompt_tokens: usage.prompt_tokens,
+            completion_tokens: usage.completion_tokens,
+        },
+        route_price,
+    );
+
+    if charge.total.0 <= 0 {
+        return Ok(());
+    }
+
+    let wallet = ensure_wallet(database, database_backend, user_id).await?;
+    if wallet.balance_microcredits < charge.total.0 {
+        return Err(AppError::InsufficientCredit);
+    }
+
+    Ok(())
+}
+
 #[derive(Debug, Clone)]
 struct WalletRow {
     id: Uuid,

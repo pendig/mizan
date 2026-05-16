@@ -210,9 +210,8 @@ pub async fn chat_completions(
         route.provider_base_url,
         route.provider_api_key.clone(),
     );
-    let estimated_prompt_tokens = billing::estimate_usage(&request_messages, "").prompt_tokens;
-    let estimated_total_tokens =
-        estimated_prompt_tokens.saturating_add(effective_max_tokens.unwrap_or_default());
+    let admission_usage = estimate_admission_usage(&request_messages, effective_max_tokens);
+    let estimated_total_tokens = admission_usage.total_tokens;
     let limit_lease = match acquire_runtime_limits(
         &state,
         vec![
@@ -230,6 +229,43 @@ pub async fn chat_completions(
             return Ok(build_error_response(&context, status, body));
         }
     };
+    if let Err(error) = billing::ensure_sufficient_credit(
+        &state.database,
+        state.database_backend(),
+        identity.user_id,
+        admission_usage,
+        route_price,
+    )
+    .await
+    {
+        let (status, body) = from_app_error(error);
+        if let Err(error) = billing::record_usage(
+            &state.database,
+            state.database_backend(),
+            billing::BillingInput {
+                request_id,
+                user_id: identity.user_id,
+                api_key_id: Some(identity.api_key_id),
+                provider_id: Some(route.provider_connection_id),
+                route_id: Some(route.id),
+                model: public_model.to_string(),
+                usage: admission_usage,
+                status_code: status.as_u16(),
+                latency_ms: request_started_at.elapsed().as_millis() as u64,
+                route_price,
+            },
+        )
+        .await
+        {
+            warn!(
+                request_id = %request_id,
+                error = %error,
+                "failed to persist insufficient-credit preflight usage"
+            );
+        }
+        release_limit_lease(Some(limit_lease));
+        return Ok(build_error_response(&context, status, body));
+    }
 
     let response = if payload.stream {
         let billing_context = StreamBillingContext {
@@ -451,6 +487,21 @@ fn resolve_effective_max_tokens(
         }
         (Some(requested), _) => Ok(Some(requested)),
         (None, route_limit) => Ok(route_limit),
+    }
+}
+
+fn estimate_admission_usage(
+    request_messages: &[ChatMessage],
+    expected_completion_tokens: Option<u64>,
+) -> mizan_providers::TokenUsage {
+    let prompt_tokens = billing::estimate_usage(request_messages, "").prompt_tokens;
+    let completion_tokens = expected_completion_tokens.unwrap_or_default();
+
+    mizan_providers::TokenUsage {
+        prompt_tokens,
+        completion_tokens,
+        total_tokens: prompt_tokens.saturating_add(completion_tokens),
+        estimated: true,
     }
 }
 
@@ -946,6 +997,21 @@ mod tests {
             resolve_effective_max_tokens(Some(64), None).unwrap(),
             Some(64)
         );
+    }
+
+    #[test]
+    fn estimate_admission_usage_counts_expected_completion_tokens() {
+        let messages = vec![ChatMessage {
+            role: "user".to_string(),
+            content: "hello world".to_string(),
+        }];
+
+        let usage = estimate_admission_usage(&messages, Some(100));
+
+        assert!(usage.estimated);
+        assert_eq!(usage.prompt_tokens, 3);
+        assert_eq!(usage.completion_tokens, 100);
+        assert_eq!(usage.total_tokens, 103);
     }
 
     #[tokio::test]
