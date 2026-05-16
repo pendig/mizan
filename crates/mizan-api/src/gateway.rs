@@ -40,6 +40,8 @@ pub struct ChatCompletionsRequest {
     pub messages: Vec<ChatMessage>,
     #[serde(default)]
     pub stream: bool,
+    #[serde(default)]
+    pub max_tokens: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -96,6 +98,7 @@ struct ResolvedModelRoute {
     provider_type: String,
     provider_base_url: String,
     provider_api_key: String,
+    max_tokens: Option<u64>,
     input_price_per_1m_tokens: i64,
     output_price_per_1m_tokens: i64,
 }
@@ -177,10 +180,20 @@ pub async fn chat_completions(
         "chat completion request",
     );
 
+    let effective_max_tokens =
+        match resolve_effective_max_tokens(payload.max_tokens, route.max_tokens) {
+            Ok(max_tokens) => max_tokens,
+            Err(error) => {
+                let (status, body) = from_app_error(error);
+                return Ok(build_error_response(&context, status, body));
+            }
+        };
+
     let upstream_request = ChatRequest {
         model: route.upstream_model.clone(),
         messages: payload.messages.clone(),
         stream: payload.stream,
+        max_tokens: effective_max_tokens,
     };
     let request_messages = upstream_request.messages.clone();
 
@@ -198,6 +211,8 @@ pub async fn chat_completions(
         route.provider_api_key.clone(),
     );
     let estimated_prompt_tokens = billing::estimate_usage(&request_messages, "").prompt_tokens;
+    let estimated_total_tokens =
+        estimated_prompt_tokens.saturating_add(effective_max_tokens.unwrap_or_default());
     let limit_lease = match acquire_runtime_limits(
         &state,
         vec![
@@ -205,7 +220,7 @@ pub async fn chat_completions(
             LimitScope::User(identity.user_id),
             LimitScope::Provider(route.provider_connection_id),
         ],
-        estimated_prompt_tokens,
+        estimated_total_tokens,
     )
     .await
     {
@@ -420,6 +435,22 @@ fn parse_request_id_header(headers: &HeaderMap, header_name: &str) -> Option<Uui
                 }
             }
         }
+    }
+}
+
+fn resolve_effective_max_tokens(
+    requested_max_tokens: Option<u64>,
+    route_max_tokens: Option<u64>,
+) -> Result<Option<u64>, AppError> {
+    match (requested_max_tokens, route_max_tokens) {
+        (Some(requested), Some(route_limit)) if requested > route_limit => {
+            Err(AppError::invalid_config(
+                "chat_completion.max_tokens",
+                "max_tokens exceeds route limit",
+            ))
+        }
+        (Some(requested), _) => Ok(Some(requested)),
+        (None, route_limit) => Ok(route_limit),
     }
 }
 
@@ -784,6 +815,7 @@ async fn resolve_model_route(
         provider_base_url: String,
         #[sqlx(rename = "provider_api_key_encrypted")]
         provider_api_key_encrypted: String,
+        max_tokens: Option<i64>,
         input_price_per_1m_tokens: i64,
         output_price_per_1m_tokens: i64,
     }
@@ -796,6 +828,7 @@ async fn resolve_model_route(
                 pc.id AS provider_connection_id,
                 pc.base_url,
                 pc.api_key_encrypted AS provider_api_key_encrypted,
+                mr.max_tokens,
                 mr.pricing_input_per_1m_tokens,
                 mr.pricing_output_per_1m_tokens
          FROM model_routes mr
@@ -819,6 +852,7 @@ async fn resolve_model_route(
     let provider_connection_id = resolved.provider_connection_id;
     let provider_base_url = resolved.provider_base_url;
     let encrypted_api_key = resolved.provider_api_key_encrypted;
+    let max_tokens = resolved.max_tokens;
     let input_price_per_1m_tokens = resolved.input_price_per_1m_tokens;
     let output_price_per_1m_tokens = resolved.output_price_per_1m_tokens;
     let id = Uuid::parse_str(&route_id).map_err(|error| {
@@ -840,6 +874,13 @@ async fn resolve_model_route(
         &provider_connection_id.to_string(),
         &encrypted_api_key,
     )?;
+    let max_tokens = max_tokens
+        .map(|value| {
+            u64::try_from(value).map_err(|_| {
+                AppError::invalid_config("model_route.max_tokens", "max_tokens cannot be negative")
+            })
+        })
+        .transpose()?;
 
     Ok(ResolvedModelRoute {
         id,
@@ -848,6 +889,7 @@ async fn resolve_model_route(
         provider_type: provider_type.trim().to_string(),
         provider_base_url,
         provider_api_key,
+        max_tokens,
         input_price_per_1m_tokens,
         output_price_per_1m_tokens,
     })
@@ -887,6 +929,23 @@ mod tests {
         assert_eq!(response.choices.len(), 1);
         assert_eq!(response.choices[0].message.content, "pong");
         assert_eq!(response.model, alias);
+    }
+
+    #[test]
+    fn resolve_effective_max_tokens_uses_route_default_and_rejects_overrides() {
+        assert_eq!(
+            resolve_effective_max_tokens(None, Some(128)).unwrap(),
+            Some(128)
+        );
+        assert_eq!(
+            resolve_effective_max_tokens(Some(64), Some(128)).unwrap(),
+            Some(64)
+        );
+        assert!(resolve_effective_max_tokens(Some(129), Some(128)).is_err());
+        assert_eq!(
+            resolve_effective_max_tokens(Some(64), None).unwrap(),
+            Some(64)
+        );
     }
 
     #[tokio::test]

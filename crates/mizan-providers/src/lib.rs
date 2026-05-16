@@ -15,6 +15,8 @@ pub struct ChatRequest {
     pub messages: Vec<ChatMessage>,
     #[serde(default)]
     pub stream: bool,
+    #[serde(default)]
+    pub max_tokens: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -215,6 +217,7 @@ impl OpenAiCompatibleProvider {
             model: request.model.clone(),
             messages: request.messages.clone(),
             stream,
+            max_tokens: request.max_tokens,
         };
 
         let response = self
@@ -509,6 +512,8 @@ struct OpenAiChatCompletionPayload {
     model: String,
     messages: Vec<ChatMessage>,
     stream: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_tokens: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
