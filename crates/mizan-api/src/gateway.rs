@@ -1123,7 +1123,7 @@ mod tests {
         let client = redis_client_from_env().expect("redis client");
         let scope_id = Uuid::now_v7();
         let scope = LimitScope::Provider(scope_id);
-        let concurrency_key = format!("mizan:limit:concurrency:provider:{scope_id}");
+        let concurrency_key = mizan_limits::concurrency_counter_key(scope);
 
         let mut connection = client.get_connection().expect("redis connection");
         redis::cmd("DEL")

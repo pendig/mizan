@@ -20,6 +20,18 @@ impl LimitScope {
     }
 }
 
+pub fn request_counter_key(scope: LimitScope) -> String {
+    format!("mizan:limit:rpm:{}", scope.key_part())
+}
+
+pub fn token_counter_key(scope: LimitScope) -> String {
+    format!("mizan:limit:tpm:{}", scope.key_part())
+}
+
+pub fn concurrency_counter_key(scope: LimitScope) -> String {
+    format!("mizan:limit:concurrency:{}", scope.key_part())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LimitDecision {
     Allowed,
@@ -145,7 +157,7 @@ fn check_request_counter(
         return Ok(());
     }
 
-    let key = format!("mizan:limit:rpm:{}", scope.key_part());
+    let key = request_counter_key(scope);
     let count = increment_window_counter(connection, &key, policy.window_seconds, 1)?;
     if count > u64::from(policy.requests_per_window) {
         return Err(AppError::LimitExceeded(format!(
@@ -167,7 +179,7 @@ fn check_token_counter(
         return Ok(());
     }
 
-    let key = format!("mizan:limit:tpm:{}", scope.key_part());
+    let key = token_counter_key(scope);
     let count = increment_window_counter(connection, &key, policy.window_seconds, tokens)?;
     if count > u64::from(policy.tokens_per_window) {
         return Err(AppError::LimitExceeded(format!(
@@ -188,7 +200,7 @@ fn acquire_concurrency_lease(
         return Ok(None);
     }
 
-    let counter_key = format!("mizan:limit:concurrency:{}", scope.key_part());
+    let counter_key = concurrency_counter_key(scope);
     let count = increment_window_counter(connection, &counter_key, policy.lease_seconds, 1)?;
     if count > u64::from(policy.concurrent_requests) {
         release_key(connection, &counter_key)?;
@@ -320,7 +332,7 @@ mod tests {
     fn redis_rpm_blocks_after_window_limit() {
         let client = redis_client_from_env().expect("redis client");
         let scope = LimitScope::ApiKey(Uuid::now_v7());
-        let key = format!("mizan:limit:rpm:{}", scope.key_part());
+        let key = request_counter_key(scope);
         cleanup_keys(&client, std::slice::from_ref(&key));
 
         let policy = RuntimeLimitPolicy {
@@ -362,7 +374,7 @@ mod tests {
     fn redis_concurrency_release_allows_next_acquire() {
         let client = redis_client_from_env().expect("redis client");
         let scope = LimitScope::User(Uuid::now_v7());
-        let key = format!("mizan:limit:concurrency:{}", scope.key_part());
+        let key = concurrency_counter_key(scope);
         cleanup_keys(&client, std::slice::from_ref(&key));
 
         let lease = check_and_acquire(
@@ -407,8 +419,8 @@ mod tests {
         let client = redis_client_from_env().expect("redis client");
         let first_scope = LimitScope::ApiKey(Uuid::now_v7());
         let second_scope = LimitScope::Provider(Uuid::now_v7());
-        let first_concurrency_key = format!("mizan:limit:concurrency:{}", first_scope.key_part());
-        let second_tpm_key = format!("mizan:limit:tpm:{}", second_scope.key_part());
+        let first_concurrency_key = concurrency_counter_key(first_scope);
+        let second_tpm_key = token_counter_key(second_scope);
         cleanup_keys(
             &client,
             &[first_concurrency_key.clone(), second_tpm_key.clone()],
