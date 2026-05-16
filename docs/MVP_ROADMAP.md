@@ -144,6 +144,7 @@ Exit criteria:
 
 - Limits behave consistently under concurrent load.
 - Leases expire safely if a request crashes.
+- Redis smoke validation is documented in [Runtime Limit Testing](LIMIT_TESTING.md).
 
 ## Phase 7 - Admin/User Thin UI or CLI
 

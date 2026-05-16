@@ -82,6 +82,7 @@ Progress status (current): Milestone 4 completed with non-streaming chat proxy f
 5. Add per-provider concurrency leases.
 6. Add insufficient-credit block.
 7. Keep Redis key naming and TTL rules in one place.
+8. Add Redis-backed load and lease cleanup smoke tests.
 
 ## Observability
 

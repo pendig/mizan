@@ -20,6 +20,18 @@ impl LimitScope {
     }
 }
 
+pub fn request_counter_key(scope: LimitScope) -> String {
+    format!("mizan:limit:rpm:{}", scope.key_part())
+}
+
+pub fn token_counter_key(scope: LimitScope) -> String {
+    format!("mizan:limit:tpm:{}", scope.key_part())
+}
+
+pub fn concurrency_counter_key(scope: LimitScope) -> String {
+    format!("mizan:limit:concurrency:{}", scope.key_part())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LimitDecision {
     Allowed,
@@ -145,7 +157,7 @@ fn check_request_counter(
         return Ok(());
     }
 
-    let key = format!("mizan:limit:rpm:{}", scope.key_part());
+    let key = request_counter_key(scope);
     let count = increment_window_counter(connection, &key, policy.window_seconds, 1)?;
     if count > u64::from(policy.requests_per_window) {
         return Err(AppError::LimitExceeded(format!(
@@ -167,7 +179,7 @@ fn check_token_counter(
         return Ok(());
     }
 
-    let key = format!("mizan:limit:tpm:{}", scope.key_part());
+    let key = token_counter_key(scope);
     let count = increment_window_counter(connection, &key, policy.window_seconds, tokens)?;
     if count > u64::from(policy.tokens_per_window) {
         return Err(AppError::LimitExceeded(format!(
@@ -188,7 +200,7 @@ fn acquire_concurrency_lease(
         return Ok(None);
     }
 
-    let counter_key = format!("mizan:limit:concurrency:{}", scope.key_part());
+    let counter_key = concurrency_counter_key(scope);
     let count = increment_window_counter(connection, &counter_key, policy.lease_seconds, 1)?;
     if count > u64::from(policy.concurrent_requests) {
         release_key(connection, &counter_key)?;
@@ -266,6 +278,7 @@ fn release_keys(connection: &mut redis::Connection, keys: &[String]) -> AppResul
 #[cfg(test)]
 mod tests {
     use super::*;
+    use redis::Commands;
 
     #[test]
     fn disabled_policy_is_detected() {
@@ -288,5 +301,178 @@ mod tests {
             LimitScope::Provider(id).key_part(),
             "provider:018f0d6f-4fd4-7b0d-9c3d-fec9dd31e906"
         );
+    }
+
+    fn redis_client_from_env() -> redis::RedisResult<Client> {
+        let redis_url =
+            std::env::var("MIZAN_REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".into());
+        Client::open(redis_url)
+    }
+
+    fn cleanup_keys(client: &Client, keys: &[String]) {
+        if let Ok(mut connection) = client.get_connection() {
+            for key in keys {
+                let _ = redis::cmd("DEL").arg(key).query::<i64>(&mut connection);
+            }
+        }
+    }
+
+    fn test_policy() -> RuntimeLimitPolicy {
+        RuntimeLimitPolicy {
+            requests_per_window: 2,
+            tokens_per_window: 5,
+            concurrent_requests: 1,
+            window_seconds: 60,
+            lease_seconds: 30,
+        }
+    }
+
+    #[test]
+    #[ignore = "requires a reachable Redis instance; run with scripts/limit-smoke.sh"]
+    fn redis_rpm_blocks_after_window_limit() {
+        let client = redis_client_from_env().expect("redis client");
+        let scope = LimitScope::ApiKey(Uuid::now_v7());
+        let key = request_counter_key(scope);
+        cleanup_keys(&client, std::slice::from_ref(&key));
+
+        let policy = RuntimeLimitPolicy {
+            requests_per_window: 2,
+            tokens_per_window: 0,
+            concurrent_requests: 0,
+            window_seconds: 60,
+            lease_seconds: 30,
+        };
+
+        for _ in 0..2 {
+            check_and_acquire(
+                client.clone(),
+                policy,
+                RuntimeLimitRequest {
+                    scopes: vec![scope],
+                    estimated_prompt_tokens: 0,
+                },
+            )
+            .expect("request should be allowed");
+        }
+
+        let error = check_and_acquire(
+            client.clone(),
+            policy,
+            RuntimeLimitRequest {
+                scopes: vec![scope],
+                estimated_prompt_tokens: 0,
+            },
+        )
+        .expect_err("third request should be rate limited");
+
+        assert!(matches!(error, AppError::LimitExceeded(_)));
+        cleanup_keys(&client, &[key]);
+    }
+
+    #[test]
+    #[ignore = "requires a reachable Redis instance; run with scripts/limit-smoke.sh"]
+    fn redis_concurrency_release_allows_next_acquire() {
+        let client = redis_client_from_env().expect("redis client");
+        let scope = LimitScope::User(Uuid::now_v7());
+        let key = concurrency_counter_key(scope);
+        cleanup_keys(&client, std::slice::from_ref(&key));
+
+        let lease = check_and_acquire(
+            client.clone(),
+            test_policy(),
+            RuntimeLimitRequest {
+                scopes: vec![scope],
+                estimated_prompt_tokens: 1,
+            },
+        )
+        .expect("first request should acquire concurrency lease");
+
+        let error = check_and_acquire(
+            client.clone(),
+            test_policy(),
+            RuntimeLimitRequest {
+                scopes: vec![scope],
+                estimated_prompt_tokens: 1,
+            },
+        )
+        .expect_err("second concurrent request should be blocked");
+        assert!(matches!(error, AppError::LimitExceeded(_)));
+
+        lease.release().expect("lease release should succeed");
+
+        let next_lease = check_and_acquire(
+            client.clone(),
+            test_policy(),
+            RuntimeLimitRequest {
+                scopes: vec![scope],
+                estimated_prompt_tokens: 1,
+            },
+        )
+        .expect("released concurrency slot should allow the next request");
+        next_lease.release().expect("cleanup next lease");
+        cleanup_keys(&client, &[key]);
+    }
+
+    #[test]
+    #[ignore = "requires a reachable Redis instance; run with scripts/limit-smoke.sh"]
+    fn redis_later_scope_failure_releases_earlier_concurrency_lease() {
+        let client = redis_client_from_env().expect("redis client");
+        let first_scope = LimitScope::ApiKey(Uuid::now_v7());
+        let second_scope = LimitScope::Provider(Uuid::now_v7());
+        let first_concurrency_key = concurrency_counter_key(first_scope);
+        let second_tpm_key = token_counter_key(second_scope);
+        cleanup_keys(
+            &client,
+            &[first_concurrency_key.clone(), second_tpm_key.clone()],
+        );
+
+        let mut connection = client.get_connection().expect("redis connection");
+        redis::cmd("SET")
+            .arg(&second_tpm_key)
+            .arg(5)
+            .arg("EX")
+            .arg(60)
+            .query::<()>(&mut connection)
+            .expect("seed token counter");
+
+        let error = check_and_acquire(
+            client.clone(),
+            test_policy(),
+            RuntimeLimitRequest {
+                scopes: vec![first_scope, second_scope],
+                estimated_prompt_tokens: 1,
+            },
+        )
+        .expect_err("later scope should exceed token window");
+        assert!(matches!(error, AppError::LimitExceeded(_)));
+
+        let remaining: Option<i64> = connection
+            .get(&first_concurrency_key)
+            .expect("get lease key");
+        assert_eq!(
+            remaining, None,
+            "earlier concurrency lease should be released after later scope failure"
+        );
+        cleanup_keys(&client, &[first_concurrency_key, second_tpm_key]);
+    }
+
+    #[test]
+    #[ignore = "requires a reachable Redis instance; run with scripts/limit-smoke.sh"]
+    fn redis_release_missing_lease_does_not_create_negative_counter() {
+        let client = redis_client_from_env().expect("redis client");
+        let key = format!("mizan:limit:concurrency:test-missing:{}", Uuid::now_v7());
+        cleanup_keys(&client, std::slice::from_ref(&key));
+
+        RuntimeLimitLease {
+            client: client.clone(),
+            keys: vec![key.clone()],
+        }
+        .release()
+        .expect("missing lease release should be a no-op");
+
+        let mut connection = client.get_connection().expect("redis connection");
+        let remaining: Option<i64> = connection.get(&key).expect("get missing lease key");
+        assert_eq!(remaining, None);
+        cleanup_keys(&client, &[key]);
     }
 }
