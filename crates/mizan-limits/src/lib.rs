@@ -88,14 +88,7 @@ impl RuntimeLimitLease {
             .client
             .get_connection()
             .map_err(|error| AppError::infrastructure(error.to_string()))?;
-        for key in self.keys {
-            let _: i64 = redis::cmd("DECR")
-                .arg(key)
-                .query(&mut connection)
-                .map_err(|error| AppError::infrastructure(error.to_string()))?;
-        }
-
-        Ok(())
+        release_keys(&mut connection, &self.keys)
     }
 }
 
@@ -114,18 +107,24 @@ pub fn check_and_acquire(
     let mut acquired_leases = Vec::new();
 
     for scope in request.scopes {
-        check_request_counter(&mut connection, policy, scope)?;
-        check_token_counter(
+        if let Err(error) = check_request_counter(&mut connection, policy, scope) {
+            let _ = release_keys(&mut connection, &acquired_leases);
+            return Err(error);
+        }
+        if let Err(error) = check_token_counter(
             &mut connection,
             policy,
             scope,
             request.estimated_prompt_tokens,
-        )?;
+        ) {
+            let _ = release_keys(&mut connection, &acquired_leases);
+            return Err(error);
+        }
         match acquire_concurrency_lease(&mut connection, policy, scope) {
             Ok(Some(key)) => acquired_leases.push(key),
             Ok(None) => {}
             Err(error) => {
-                release_keys(&mut connection, &acquired_leases)?;
+                let _ = release_keys(&mut connection, &acquired_leases);
                 return Err(error);
             }
         }
@@ -211,30 +210,41 @@ fn increment_window_counter(
     ttl_seconds: u32,
     amount: u64,
 ) -> AppResult<u64> {
-    let count: u64 = redis::cmd("INCRBY")
+    let count: u64 = redis::cmd("EVAL")
+        .arg(
+            "local current = redis.call('INCRBY', KEYS[1], ARGV[1]) \
+             if current == tonumber(ARGV[1]) then \
+               redis.call('EXPIRE', KEYS[1], ARGV[2]) \
+             end \
+             return current",
+        )
+        .arg(1)
         .arg(key)
         .arg(amount)
+        .arg(ttl_seconds.max(1))
         .query(connection)
         .map_err(|error| AppError::infrastructure(error.to_string()))?;
-
-    if count == amount {
-        let _: bool = redis::cmd("EXPIRE")
-            .arg(key)
-            .arg(ttl_seconds.max(1))
-            .query(connection)
-            .map_err(|error| AppError::infrastructure(error.to_string()))?;
-    }
 
     Ok(count)
 }
 
 fn release_keys(connection: &mut redis::Connection, keys: &[String]) -> AppResult<()> {
+    let mut first_error = None;
+
     for key in keys {
-        let _: i64 = redis::cmd("DECR")
-            .arg(key)
-            .query(&mut *connection)
-            .map_err(|error| AppError::infrastructure(error.to_string()))?;
+        let result = redis::cmd("DECR").arg(key).query::<i64>(&mut *connection);
+
+        if let Err(error) = result
+            && first_error.is_none()
+        {
+            first_error = Some(error.to_string());
+        }
     }
+
+    if let Some(error) = first_error {
+        return Err(AppError::infrastructure(error));
+    }
+
     Ok(())
 }
 

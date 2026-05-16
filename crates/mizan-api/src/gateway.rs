@@ -389,9 +389,11 @@ fn release_limit_lease(lease: Option<RuntimeLimitLease>) {
         return;
     };
 
-    if let Err(error) = lease.release() {
-        warn!(error = %error, "failed to release runtime limit lease");
-    }
+    let _release_task = task::spawn_blocking(move || {
+        if let Err(error) = lease.release() {
+            warn!(error = %error, "failed to release runtime limit lease");
+        }
+    });
 }
 
 fn parse_request_id_header(headers: &HeaderMap, header_name: &str) -> Option<Uuid> {
@@ -550,6 +552,12 @@ fn build_stream_events(
         database_backend: DatabaseBackend,
         emit_done: bool,
         limit_lease: Option<RuntimeLimitLease>,
+    }
+
+    impl Drop for StreamBuildState {
+        fn drop(&mut self) {
+            release_limit_lease(self.limit_lease.take());
+        }
     }
 
     stream::unfold(
