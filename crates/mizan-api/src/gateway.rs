@@ -950,6 +950,8 @@ async fn resolve_model_route(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mizan_limits::{RuntimeLimitPolicy, RuntimeLimitRequest};
+    use redis::Commands;
 
     async fn sqlite_test_database() -> AnyPool {
         sqlx::any::install_default_drivers();
@@ -958,6 +960,12 @@ mod tests {
             .connect("sqlite::memory:")
             .await
             .expect("create sqlite test database")
+    }
+
+    fn redis_client_from_env() -> redis::RedisResult<redis::Client> {
+        let redis_url =
+            std::env::var("MIZAN_REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".into());
+        redis::Client::open(redis_url)
     }
 
     #[test]
@@ -1107,5 +1115,90 @@ mod tests {
             .expect("stream should finish after error");
 
         assert!(second.is_none());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a reachable Redis instance; run with scripts/limit-smoke.sh"]
+    async fn dropping_stream_events_releases_runtime_limit_lease() {
+        let client = redis_client_from_env().expect("redis client");
+        let scope_id = Uuid::now_v7();
+        let scope = LimitScope::Provider(scope_id);
+        let concurrency_key = format!("mizan:limit:concurrency:provider:{scope_id}");
+
+        let mut connection = client.get_connection().expect("redis connection");
+        redis::cmd("DEL")
+            .arg(&concurrency_key)
+            .query::<i64>(&mut connection)
+            .expect("cleanup concurrency key");
+
+        let limit_lease = mizan_limits::check_and_acquire(
+            client.clone(),
+            RuntimeLimitPolicy {
+                requests_per_window: 0,
+                tokens_per_window: 0,
+                concurrent_requests: 1,
+                window_seconds: 60,
+                lease_seconds: 30,
+            },
+            RuntimeLimitRequest {
+                scopes: vec![scope],
+                estimated_prompt_tokens: 0,
+            },
+        )
+        .expect("lease should be acquired");
+
+        let upstream = stream::iter([Ok(ChatStreamChunk {
+            index: 0,
+            delta: "hello".to_string(),
+            finish_reason: None,
+            usage: None,
+        })])
+        .boxed();
+        let context = RequestContext::new();
+        let database = sqlite_test_database().await;
+        let mut events = Box::pin(build_stream_events(
+            "chatcmpl-drop",
+            "mizan-public-model".to_string(),
+            upstream,
+            vec![],
+            &context,
+            StreamBillingContext {
+                request_started_at: Instant::now(),
+                database,
+                database_backend: DatabaseBackend::Sqlite,
+                route_price: RoutePrice {
+                    input_microcredits_per_1m_tokens: 0,
+                    output_microcredits_per_1m_tokens: 0,
+                },
+                user_id: Uuid::now_v7(),
+                api_key_id: Some(Uuid::now_v7()),
+                provider_id: scope_id,
+                route_id: Uuid::now_v7(),
+                limit_lease: Some(limit_lease),
+            },
+        ));
+
+        let first = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            events.as_mut().next(),
+        )
+        .await
+        .expect("gateway should emit first stream event")
+        .expect("gateway stream should yield an event")
+        .expect("event should be infallible");
+        assert!(format!("{first:?}").contains("hello"));
+
+        drop(events);
+        for _ in 0..20 {
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            let remaining: Option<i64> = connection
+                .get(&concurrency_key)
+                .expect("get concurrency key");
+            if remaining.is_none() {
+                return;
+            }
+        }
+
+        panic!("dropped stream should release runtime limit lease");
     }
 }
