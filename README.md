@@ -113,7 +113,9 @@ Environment variables:
 
 - `MIZAN_PROVIDER_SECRET_KEY` (required before creating provider connections, used to encrypt provider API keys at rest)
 - `MIZAN_HTTP_ADDR` (default `0.0.0.0:18180`)
-- `MIZAN_DATABASE_URL`, `MIZAN_DB_MAX_CONNECTIONS`, `MIZAN_RUN_MIGRATIONS` for storage
+- `DATABASE_URL`, `MIZAN_DB_MAX_CONNECTIONS`, `MIZAN_RUN_MIGRATIONS` for storage
+- `REDIS_URL`, `MIZAN_LIMIT_RPM`, `MIZAN_LIMIT_TPM`, `MIZAN_LIMIT_CONCURRENCY`,
+  `MIZAN_LIMIT_WINDOW_SECONDS`, and `MIZAN_LIMIT_LEASE_SECONDS` for runtime limits
 - `MIZAN_ADMIN_EMAIL`, `MIZAN_ADMIN_PASSWORD`, `MIZAN_ADMIN_ROLE` for optional bootstrap
 
 Run the API locally:

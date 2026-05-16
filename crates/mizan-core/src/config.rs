@@ -10,6 +10,11 @@ pub struct AppConfig {
     pub database_max_connections: u32,
     pub run_migrations: bool,
     pub redis_url: String,
+    pub limit_rpm: u32,
+    pub limit_tpm: u32,
+    pub limit_concurrency: u32,
+    pub limit_window_seconds: u32,
+    pub limit_lease_seconds: u32,
     pub log_level: String,
     pub admin_seed_email: Option<String>,
     pub admin_seed_password: Option<String>,
@@ -80,6 +85,33 @@ impl AppConfig {
                 })?,
                 redis_url: env::var("REDIS_URL")
                     .unwrap_or_else(|_| "redis://127.0.0.1:6379/".to_owned()),
+                limit_rpm: env::var("MIZAN_LIMIT_RPM")
+                    .map_or(Ok(0), |value| parse_u32_env("MIZAN_LIMIT_RPM", &value, 0))?,
+                limit_tpm: env::var("MIZAN_LIMIT_TPM")
+                    .map_or(Ok(0), |value| parse_u32_env("MIZAN_LIMIT_TPM", &value, 0))?,
+                limit_concurrency: env::var("MIZAN_LIMIT_CONCURRENCY").map_or(Ok(0), |value| {
+                    parse_u32_env("MIZAN_LIMIT_CONCURRENCY", &value, 0)
+                })?,
+                limit_window_seconds: env::var("MIZAN_LIMIT_WINDOW_SECONDS").map_or(
+                    Ok(DEFAULT_LIMIT_WINDOW_SECONDS),
+                    |value| {
+                        parse_u32_env(
+                            "MIZAN_LIMIT_WINDOW_SECONDS",
+                            &value,
+                            DEFAULT_LIMIT_WINDOW_SECONDS,
+                        )
+                    },
+                )?,
+                limit_lease_seconds: env::var("MIZAN_LIMIT_LEASE_SECONDS").map_or(
+                    Ok(DEFAULT_LIMIT_LEASE_SECONDS),
+                    |value| {
+                        parse_u32_env(
+                            "MIZAN_LIMIT_LEASE_SECONDS",
+                            &value,
+                            DEFAULT_LIMIT_LEASE_SECONDS,
+                        )
+                    },
+                )?,
                 log_level: env::var("RUST_LOG")
                     .unwrap_or_else(|_| "mizan=info,tower_http=info".to_owned()),
                 admin_seed_email,
@@ -166,6 +198,8 @@ fn parse_bool_value(key: &'static str, raw_value: &str) -> AppResult<bool> {
 }
 
 const DEFAULT_DATABASE_MAX_CONNECTIONS: u32 = 10;
+const DEFAULT_LIMIT_WINDOW_SECONDS: u32 = 60;
+const DEFAULT_LIMIT_LEASE_SECONDS: u32 = 120;
 
 fn parse_u32_env(key: &'static str, raw_value: &str, default: u32) -> AppResult<u32> {
     let value = raw_value.trim();
@@ -177,7 +211,7 @@ fn parse_u32_env(key: &'static str, raw_value: &str, default: u32) -> AppResult<
         .parse::<u32>()
         .map_err(|_| AppError::invalid_config(key, "must be a positive integer"))?;
 
-    if parsed == 0 {
+    if parsed == 0 && default > 0 {
         return Err(AppError::invalid_config(key, "must be greater than zero"));
     }
 
@@ -234,5 +268,14 @@ mod tests {
         assert!(parse_u32_env("MIZAN_DB_MAX_CONNECTIONS", "10", 10).expect("ok") == 10);
         assert!(parse_u32_env("MIZAN_DB_MAX_CONNECTIONS", "0", 10).is_err());
         assert!(parse_u32_env("MIZAN_DB_MAX_CONNECTIONS", "bad", 10).is_err());
+    }
+
+    #[test]
+    fn parse_u32_env_allows_zero_when_default_is_zero() {
+        assert_eq!(
+            parse_u32_env("MIZAN_LIMIT_RPM", "0", 0).expect("disabled"),
+            0
+        );
+        assert_eq!(parse_u32_env("MIZAN_LIMIT_RPM", "", 0).expect("default"), 0);
     }
 }
