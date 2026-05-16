@@ -191,10 +191,7 @@ fn acquire_concurrency_lease(
     let counter_key = format!("mizan:limit:concurrency:{}", scope.key_part());
     let count = increment_window_counter(connection, &counter_key, policy.lease_seconds, 1)?;
     if count > u64::from(policy.concurrent_requests) {
-        let _: i64 = redis::cmd("DECR")
-            .arg(&counter_key)
-            .query(connection)
-            .map_err(|error| AppError::infrastructure(error.to_string()))?;
+        release_key(connection, &counter_key)?;
         return Err(AppError::LimitExceeded(format!(
             "concurrent_requests exceeded for {}",
             scope.key_part()
@@ -228,21 +225,39 @@ fn increment_window_counter(
     Ok(count)
 }
 
+fn release_key(connection: &mut redis::Connection, key: &str) -> AppResult<i64> {
+    let count: i64 = redis::cmd("EVAL")
+        .arg(
+            "if redis.call('EXISTS', KEYS[1]) == 0 then \
+               return 0 \
+             end \
+             local current = redis.call('DECR', KEYS[1]) \
+             if current <= 0 then \
+               redis.call('DEL', KEYS[1]) \
+             end \
+             return current",
+        )
+        .arg(1)
+        .arg(key)
+        .query(connection)
+        .map_err(|error| AppError::infrastructure(error.to_string()))?;
+
+    Ok(count)
+}
+
 fn release_keys(connection: &mut redis::Connection, keys: &[String]) -> AppResult<()> {
     let mut first_error = None;
 
     for key in keys {
-        let result = redis::cmd("DECR").arg(key).query::<i64>(&mut *connection);
-
-        if let Err(error) = result
+        if let Err(error) = release_key(connection, key)
             && first_error.is_none()
         {
-            first_error = Some(error.to_string());
+            first_error = Some(error);
         }
     }
 
     if let Some(error) = first_error {
-        return Err(AppError::infrastructure(error));
+        return Err(error);
     }
 
     Ok(())
