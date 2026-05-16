@@ -15,6 +15,7 @@ use axum::{
 };
 use futures_util::{StreamExt, stream};
 use mizan_core::{AppError, DatabaseBackend, ErrorEnvelope, RequestContext, RequestContextBuilder};
+use mizan_limits::{LimitScope, RuntimeLimitLease, RuntimeLimitPolicy, RuntimeLimitRequest};
 use mizan_providers::{
     ChatCompletionStream, ChatMessage, ChatRequest, ChatResponse, ChatStreamChunk,
     OpenAiCompatibleProvider,
@@ -22,6 +23,7 @@ use mizan_providers::{
 use mizan_wallet::RoutePrice;
 use serde::{Deserialize, Serialize};
 use sqlx::{AnyPool, FromRow, query_as};
+use tokio::task;
 use tracing::{info, warn};
 use uuid::Uuid;
 
@@ -195,6 +197,24 @@ pub async fn chat_completions(
         route.provider_base_url,
         route.provider_api_key.clone(),
     );
+    let estimated_prompt_tokens = billing::estimate_usage(&request_messages, "").prompt_tokens;
+    let limit_lease = match acquire_runtime_limits(
+        &state,
+        vec![
+            LimitScope::ApiKey(identity.api_key_id),
+            LimitScope::User(identity.user_id),
+            LimitScope::Provider(route.provider_connection_id),
+        ],
+        estimated_prompt_tokens,
+    )
+    .await
+    {
+        Ok(lease) => lease,
+        Err(error) => {
+            let (status, body) = from_app_error(error);
+            return Ok(build_error_response(&context, status, body));
+        }
+    };
 
     let response = if payload.stream {
         let billing_context = StreamBillingContext {
@@ -206,6 +226,7 @@ pub async fn chat_completions(
             api_key_id: Some(identity.api_key_id),
             provider_id: route.provider_connection_id,
             route_id: route.id,
+            limit_lease: Some(limit_lease),
         };
 
         let upstream = match state
@@ -242,6 +263,7 @@ pub async fn chat_completions(
                         "failed to persist stream request usage for upstream stream init error"
                     );
                 }
+                release_limit_lease(billing_context.limit_lease);
                 return Ok(build_error_response(&context, status, body));
             }
         };
@@ -289,6 +311,7 @@ pub async fn chat_completions(
                         "failed to persist non-stream request usage for upstream error"
                     );
                 }
+                release_limit_lease(Some(limit_lease));
                 return Ok(build_error_response(&context, status, body));
             }
         };
@@ -317,18 +340,58 @@ pub async fn chat_completions(
         .await
         {
             let (status, body) = from_app_error(error);
+            release_limit_lease(Some(limit_lease));
             return Ok(build_error_response(&context, status, body));
         }
 
-        json_chat_completion_response(
+        let response = json_chat_completion_response(
             &completion_id,
             public_model.to_string(),
             upstream_response,
             &context,
-        )
+        );
+        release_limit_lease(Some(limit_lease));
+        response
     };
 
     Ok(response)
+}
+
+async fn acquire_runtime_limits(
+    state: &AppState,
+    scopes: Vec<LimitScope>,
+    estimated_prompt_tokens: u64,
+) -> Result<RuntimeLimitLease, AppError> {
+    let policy = RuntimeLimitPolicy {
+        requests_per_window: state.config.limit_rpm,
+        tokens_per_window: state.config.limit_tpm,
+        concurrent_requests: state.config.limit_concurrency,
+        window_seconds: state.config.limit_window_seconds,
+        lease_seconds: state.config.limit_lease_seconds,
+    };
+    let client = state.redis.clone();
+    task::spawn_blocking(move || {
+        mizan_limits::check_and_acquire(
+            client,
+            policy,
+            RuntimeLimitRequest {
+                scopes,
+                estimated_prompt_tokens,
+            },
+        )
+    })
+    .await
+    .map_err(|error| AppError::infrastructure(error.to_string()))?
+}
+
+fn release_limit_lease(lease: Option<RuntimeLimitLease>) {
+    let Some(lease) = lease else {
+        return;
+    };
+
+    if let Err(error) = lease.release() {
+        warn!(error = %error, "failed to release runtime limit lease");
+    }
 }
 
 fn parse_request_id_header(headers: &HeaderMap, header_name: &str) -> Option<Uuid> {
@@ -442,7 +505,7 @@ fn stream_chat_completion_response(
     response
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct StreamBillingContext {
     request_started_at: Instant,
     database: AnyPool,
@@ -452,6 +515,7 @@ struct StreamBillingContext {
     api_key_id: Option<Uuid>,
     provider_id: Uuid,
     route_id: Uuid,
+    limit_lease: Option<RuntimeLimitLease>,
 }
 
 fn build_stream_events(
@@ -485,6 +549,7 @@ fn build_stream_events(
         database: AnyPool,
         database_backend: DatabaseBackend,
         emit_done: bool,
+        limit_lease: Option<RuntimeLimitLease>,
     }
 
     stream::unfold(
@@ -506,6 +571,7 @@ fn build_stream_events(
             database: billing_context.database,
             database_backend: billing_context.database_backend,
             emit_done: true,
+            limit_lease: billing_context.limit_lease,
         },
         |mut state| async move {
             if !state.emit_done {
@@ -565,6 +631,7 @@ fn build_stream_events(
                                     error = %error,
                                     "failed to persist stream request usage after stream chunk error"
                                 );
+                                release_limit_lease(state.limit_lease.take());
                                 return Some((
                                     Ok(Event::default()
                                         .event("error")
@@ -573,6 +640,7 @@ fn build_stream_events(
                                     state,
                                 ));
                             }
+                            release_limit_lease(state.limit_lease.take());
                             Event::default()
                                 .event("error")
                                 .json_data(ErrorEnvelope::from(&error))
@@ -611,6 +679,7 @@ fn build_stream_events(
                                 error = %error,
                                 "failed to persist stream request usage"
                             );
+                            release_limit_lease(state.limit_lease.take());
                             return Some((
                                 Ok(Event::default()
                                     .event("error")
@@ -619,6 +688,7 @@ fn build_stream_events(
                                 state,
                             ));
                         }
+                        release_limit_lease(state.limit_lease.take());
                         Some((Ok(Event::default().data("[DONE]")), state))
                     } else {
                         None
@@ -848,6 +918,7 @@ mod tests {
                 api_key_id: Some(Uuid::now_v7()),
                 provider_id: Uuid::now_v7(),
                 route_id: Uuid::now_v7(),
+                limit_lease: None,
             },
         );
         futures_util::pin_mut!(events);
@@ -884,6 +955,7 @@ mod tests {
                 api_key_id: Some(Uuid::now_v7()),
                 provider_id: Uuid::now_v7(),
                 route_id: Uuid::now_v7(),
+                limit_lease: None,
             },
         );
         futures_util::pin_mut!(events);

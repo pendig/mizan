@@ -8,5 +8,6 @@ rust-version.workspace = true
 
 [dependencies]
 mizan-core = { path = "../mizan-core" }
+redis.workspace = true
 serde.workspace = true
 uuid.workspace = true

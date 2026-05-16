@@ -1066,6 +1066,7 @@ dependencies = [
  "futures-util",
  "mizan-core",
  "mizan-gateway",
+ "mizan-limits",
  "mizan-metering",
  "mizan-providers",
  "mizan-wallet",
@@ -1113,6 +1114,7 @@ name = "mizan-limits"
 version = "0.1.0"
 dependencies = [
  "mizan-core",
+ "redis",
  "serde",
  "uuid",
 ]
