@@ -211,24 +211,7 @@ pub async fn chat_completions(
         route.provider_api_key.clone(),
     );
     let admission_usage = estimate_admission_usage(&request_messages, effective_max_tokens);
-    let estimated_total_tokens = admission_usage.total_tokens;
-    let limit_lease = match acquire_runtime_limits(
-        &state,
-        vec![
-            LimitScope::ApiKey(identity.api_key_id),
-            LimitScope::User(identity.user_id),
-            LimitScope::Provider(route.provider_connection_id),
-        ],
-        estimated_total_tokens,
-    )
-    .await
-    {
-        Ok(lease) => lease,
-        Err(error) => {
-            let (status, body) = from_app_error(error);
-            return Ok(build_error_response(&context, status, body));
-        }
-    };
+    let prompt_only_usage = billing::estimate_usage(&request_messages, "");
     if let Err(error) = billing::ensure_sufficient_credit(
         &state.database,
         state.database_backend(),
@@ -249,7 +232,7 @@ pub async fn chat_completions(
                 provider_id: Some(route.provider_connection_id),
                 route_id: Some(route.id),
                 model: public_model.to_string(),
-                usage: admission_usage,
+                usage: prompt_only_usage,
                 status_code: status.as_u16(),
                 latency_ms: request_started_at.elapsed().as_millis() as u64,
                 route_price,
@@ -263,9 +246,27 @@ pub async fn chat_completions(
                 "failed to persist insufficient-credit preflight usage"
             );
         }
-        release_limit_lease(Some(limit_lease));
         return Ok(build_error_response(&context, status, body));
     }
+
+    let estimated_total_tokens = admission_usage.total_tokens;
+    let limit_lease = match acquire_runtime_limits(
+        &state,
+        vec![
+            LimitScope::ApiKey(identity.api_key_id),
+            LimitScope::User(identity.user_id),
+            LimitScope::Provider(route.provider_connection_id),
+        ],
+        estimated_total_tokens,
+    )
+    .await
+    {
+        Ok(lease) => lease,
+        Err(error) => {
+            let (status, body) = from_app_error(error);
+            return Ok(build_error_response(&context, status, body));
+        }
+    };
 
     let response = if payload.stream {
         let billing_context = StreamBillingContext {
