@@ -1,6 +1,4 @@
 use std::collections::HashMap;
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex};
 
 use mizan_metering::UsageChargeInput;
@@ -9,6 +7,8 @@ use mizan_wallet::{RoutePrice, calculate_usage_charge};
 
 const LATENCY_BUCKETS_MS: [u64; 7] = [50, 100, 250, 500, 1_000, 2_500, 5_000];
 const METRIC_SHARDS: usize = 16;
+const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
+const FNV_PRIME: u64 = 0x00000100000001b3;
 
 #[derive(Debug, Clone)]
 pub struct MetricsRegistry {
@@ -238,9 +238,25 @@ fn normalize_label(value: String) -> String {
 }
 
 fn shard_index(labels: &GatewayLabels) -> usize {
-    let mut hasher = DefaultHasher::new();
-    labels.hash(&mut hasher);
-    hasher.finish() as usize % METRIC_SHARDS
+    let mut hash = FNV_OFFSET_BASIS;
+    hash = fnv1a_len_prefixed(hash, labels.route.as_bytes());
+    hash = fnv1a_len_prefixed(hash, labels.provider.as_bytes());
+    hash = fnv1a_len_prefixed(hash, labels.model.as_bytes());
+    hash = fnv1a(hash, &labels.status.to_le_bytes());
+    hash as usize % METRIC_SHARDS
+}
+
+fn fnv1a_len_prefixed(hash: u64, value: &[u8]) -> u64 {
+    let hash = fnv1a(hash, &(value.len() as u64).to_le_bytes());
+    fnv1a(hash, value)
+}
+
+fn fnv1a(mut hash: u64, value: &[u8]) -> u64 {
+    for byte in value {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    hash
 }
 
 fn escape_label(value: &str) -> String {
