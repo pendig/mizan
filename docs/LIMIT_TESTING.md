@@ -10,6 +10,7 @@ Mizan has two layers of runtime limit validation:
 Start or point to a Redis instance, then run:
 
 ```bash
+docker compose up -d redis
 MIZAN_REDIS_URL=redis://127.0.0.1:6379 scripts/limit-smoke.sh
 ```
 
@@ -32,3 +33,6 @@ cargo fmt
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
+
+For the `v0.1.0-alpha.1` pre-release, run both this Redis limit smoke and the
+end-to-end alpha smoke documented in [Alpha Runbook](ALPHA_RUNBOOK.md).

@@ -327,6 +327,16 @@ mod tests {
         }
     }
 
+    fn concurrency_only_policy() -> RuntimeLimitPolicy {
+        RuntimeLimitPolicy {
+            requests_per_window: 0,
+            tokens_per_window: 0,
+            concurrent_requests: 1,
+            window_seconds: 60,
+            lease_seconds: 30,
+        }
+    }
+
     #[test]
     #[ignore = "requires a reachable Redis instance; run with scripts/limit-smoke.sh"]
     fn redis_rpm_blocks_after_window_limit() {
@@ -379,20 +389,20 @@ mod tests {
 
         let lease = check_and_acquire(
             client.clone(),
-            test_policy(),
+            concurrency_only_policy(),
             RuntimeLimitRequest {
                 scopes: vec![scope],
-                estimated_prompt_tokens: 1,
+                estimated_prompt_tokens: 0,
             },
         )
         .expect("first request should acquire concurrency lease");
 
         let error = check_and_acquire(
             client.clone(),
-            test_policy(),
+            concurrency_only_policy(),
             RuntimeLimitRequest {
                 scopes: vec![scope],
-                estimated_prompt_tokens: 1,
+                estimated_prompt_tokens: 0,
             },
         )
         .expect_err("second concurrent request should be blocked");
@@ -402,10 +412,10 @@ mod tests {
 
         let next_lease = check_and_acquire(
             client.clone(),
-            test_policy(),
+            concurrency_only_policy(),
             RuntimeLimitRequest {
                 scopes: vec![scope],
-                estimated_prompt_tokens: 1,
+                estimated_prompt_tokens: 0,
             },
         )
         .expect("released concurrency slot should allow the next request");

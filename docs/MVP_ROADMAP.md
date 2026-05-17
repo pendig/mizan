@@ -113,6 +113,8 @@ Exit criteria:
 
 ## Phase 5 - Usage Metering and Credits
 
+Status: Implemented for backend/API alpha
+
 Deliverables:
 
 - Usage event table.
@@ -131,6 +133,8 @@ Exit criteria:
 
 ## Phase 6 - Limits
 
+Status: Implemented for backend/API alpha
+
 Deliverables:
 
 - Redis RPM and TPM counters.
@@ -147,6 +151,8 @@ Exit criteria:
 - Redis smoke validation is documented in [Runtime Limit Testing](LIMIT_TESTING.md).
 
 ## Phase 7 - Admin/User Thin UI or CLI
+
+Status: API-only alpha surface implemented
 
 Choose one lean path:
 
@@ -166,6 +172,9 @@ Exit criteria:
 - A non-core contributor can run and test the project locally.
 
 ## First Public Alpha Scope
+
+Status: Backend/API alpha ready after local smoke validation. See
+[Alpha 1 Readiness](ALPHA_1_READINESS.md).
 
 Include:
 

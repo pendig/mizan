@@ -13,13 +13,15 @@ runtime limit engine before building a large dashboard.
 
 ## Status
 
-Mizan is in active bootstrap-to-MVP delivery. Milestone 3 (auth/API keys) and
-Milestone 4 (provider/model management + `GET /v1/models`) are implemented.
-Milestone 2 (SQLite-first database foundation) is also implemented with
-idempotent migrations.
-Milestone 5 has a `POST /v1/chat/completions` route with routing and upstream
-error shaping in place, and OpenAI-compatible streaming upstream chunks now flow
-through SSE as `chat.completion.chunk`.
+Mizan is ready for a backend/API-focused `v0.1.0-alpha.1` pre-release. The
+alpha surface includes SQLite-first storage, auth and virtual API keys,
+provider/model routing, OpenAI-compatible non-streaming and streaming chat,
+usage metering, credit ledger updates, Redis runtime limits, and Prometheus
+gateway metrics.
+
+This is not a stable/full release yet. The remaining tracked work before a
+broader MVP is the RTK-backed CLI proxy baseline and durable request/admin
+audit log foundations.
 
 ## MVP Scope
 
@@ -43,6 +45,7 @@ accounting unit used by the gateway to meter and control usage.
 - [Engineering Principles](docs/ENGINEERING_PRINCIPLES.md)
 - [MVP Roadmap](docs/MVP_ROADMAP.md)
 - [Backend Implementation Plan](docs/BACKEND_IMPLEMENTATION_PLAN.md)
+- [Alpha 1 Readiness](docs/ALPHA_1_READINESS.md)
 - [Runtime Limit Testing](docs/LIMIT_TESTING.md)
 - [Alpha Runbook](docs/ALPHA_RUNBOOK.md)
 - [RTK Base Strategy](docs/RTK_BASE_STRATEGY.md)
@@ -130,6 +133,13 @@ Run API, SQLite-backed storage, and Redis with Docker Compose:
 
 ```sh
 docker compose up --build
+```
+
+Run the alpha validation flow with Redis available:
+
+```sh
+MIZAN_REDIS_URL=redis://127.0.0.1:6379 scripts/limit-smoke.sh
+REDIS_URL=redis://127.0.0.1:6379/ scripts/alpha-smoke.sh
 ```
 
 ## License

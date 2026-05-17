@@ -26,6 +26,12 @@ Prerequisites:
 - `python3`
 - Redis available at `REDIS_URL` or `redis://127.0.0.1:6379/`
 
+If Redis is not already running locally, start it with Docker Compose:
+
+```bash
+docker compose up -d redis
+```
+
 Run:
 
 ```bash
@@ -62,6 +68,21 @@ The smoke covers:
 - streaming chat
 - usage and credit reads
 - Prometheus metrics scrape
+
+## Alpha 1 Release Gate
+
+Before tagging `v0.1.0-alpha.1`, run:
+
+```bash
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+MIZAN_REDIS_URL=redis://127.0.0.1:6379 scripts/limit-smoke.sh
+REDIS_URL=redis://127.0.0.1:6379/ scripts/alpha-smoke.sh
+```
+
+See [Alpha 1 Readiness](ALPHA_1_READINESS.md) for the current release
+boundary and latest local proof.
 
 ## Troubleshooting
 

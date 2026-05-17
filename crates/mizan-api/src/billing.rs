@@ -455,19 +455,19 @@ async fn list_usage_events(
     }
 
     let sql = if user_id_filter.is_some() {
-        "SELECT id, request_id, user_id, api_key_id, provider_id, route_id, model,\
-             usage_prompt_tokens, usage_completion_tokens, usage_total_tokens, usage_estimated,\
-             status_code, latency_ms, created_at\
-             FROM usage_events\
-             WHERE user_id = ?\
-             ORDER BY created_at DESC\
+        "SELECT id, request_id, user_id, api_key_id, provider_id, route_id, model, \
+             usage_prompt_tokens, usage_completion_tokens, usage_total_tokens, usage_estimated, \
+             status_code, latency_ms, created_at \
+             FROM usage_events \
+             WHERE user_id = ? \
+             ORDER BY created_at DESC \
              LIMIT ? OFFSET ?"
     } else {
-        "SELECT id, request_id, user_id, api_key_id, provider_id, route_id, model,\
-             usage_prompt_tokens, usage_completion_tokens, usage_total_tokens, usage_estimated,\
-             status_code, latency_ms, created_at\
-             FROM usage_events\
-             ORDER BY created_at DESC\
+        "SELECT id, request_id, user_id, api_key_id, provider_id, route_id, model, \
+             usage_prompt_tokens, usage_completion_tokens, usage_total_tokens, usage_estimated, \
+             status_code, latency_ms, created_at \
+             FROM usage_events \
+             ORDER BY created_at DESC \
              LIMIT ? OFFSET ?"
     };
 

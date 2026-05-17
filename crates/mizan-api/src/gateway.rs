@@ -1078,11 +1078,11 @@ async fn resolve_model_route(
                 mr.upstream_model,
                 pc.provider_type,
                 pc.id AS provider_connection_id,
-                pc.base_url,
+                pc.base_url AS provider_base_url,
                 pc.api_key_encrypted AS provider_api_key_encrypted,
                 mr.max_tokens,
-                mr.pricing_input_per_1m_tokens,
-                mr.pricing_output_per_1m_tokens
+                mr.pricing_input_per_1m_tokens AS input_price_per_1m_tokens,
+                mr.pricing_output_per_1m_tokens AS output_price_per_1m_tokens
          FROM model_routes mr
          INNER JOIN provider_connections pc
             ON pc.id = mr.provider_connection_id
