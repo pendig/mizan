@@ -6,10 +6,13 @@ use mizan_providers::TokenUsage;
 use mizan_wallet::{RoutePrice, calculate_usage_charge};
 
 const LATENCY_BUCKETS_MS: [u64; 7] = [50, 100, 250, 500, 1_000, 2_500, 5_000];
+const METRIC_SHARDS: usize = 16;
+const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
+const FNV_PRIME: u64 = 0x00000100000001b3;
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct MetricsRegistry {
-    inner: Arc<Mutex<MetricsInner>>,
+    shards: Arc<[Mutex<MetricsInner>; METRIC_SHARDS]>,
 }
 
 #[derive(Debug, Default)]
@@ -17,7 +20,7 @@ struct MetricsInner {
     stats: HashMap<GatewayLabels, MetricSet>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 struct GatewayLabels {
     route: String,
     provider: String,
@@ -61,8 +64,7 @@ impl MetricsRegistry {
             model: normalize_label(observation.model),
             status: observation.status,
         };
-        let mut inner = self
-            .inner
+        let mut inner = self.shards[shard_index(&labels)]
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let metrics = inner.stats.entry(labels).or_default();
@@ -92,15 +94,12 @@ impl MetricsRegistry {
     }
 
     pub fn render_prometheus(&self) -> String {
-        let inner = self
-            .inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let stats = self.snapshot();
         let mut output = String::new();
 
         output.push_str("# HELP mizan_gateway_requests_total Gateway requests by route, provider, model, and status.\n");
         output.push_str("# TYPE mizan_gateway_requests_total counter\n");
-        for (labels, metrics) in &inner.stats {
+        for (labels, metrics) in &stats {
             output.push_str(&format!(
                 "mizan_gateway_requests_total{{{}}} {}\n",
                 labels.prometheus(),
@@ -112,21 +111,21 @@ impl MetricsRegistry {
             &mut output,
             "mizan_gateway_prompt_tokens_total",
             "Prompt tokens observed by the gateway.",
-            &inner.stats,
+            &stats,
             |metrics| metrics.prompt_tokens,
         );
         append_counter(
             &mut output,
             "mizan_gateway_completion_tokens_total",
             "Completion tokens observed by the gateway.",
-            &inner.stats,
+            &stats,
             |metrics| metrics.completion_tokens,
         );
         append_counter(
             &mut output,
             "mizan_gateway_tokens_total",
             "Total tokens observed by the gateway.",
-            &inner.stats,
+            &stats,
             |metrics| metrics.total_tokens,
         );
 
@@ -134,7 +133,7 @@ impl MetricsRegistry {
             "# HELP mizan_gateway_credits_charged_total Microcredits charged by the gateway.\n",
         );
         output.push_str("# TYPE mizan_gateway_credits_charged_total counter\n");
-        for (labels, metrics) in &inner.stats {
+        for (labels, metrics) in &stats {
             output.push_str(&format!(
                 "mizan_gateway_credits_charged_total{{{}}} {}\n",
                 labels.prometheus(),
@@ -144,7 +143,7 @@ impl MetricsRegistry {
 
         output.push_str("# HELP mizan_gateway_latency_ms Gateway latency in milliseconds.\n");
         output.push_str("# TYPE mizan_gateway_latency_ms histogram\n");
-        for (labels, metrics) in &inner.stats {
+        for (labels, metrics) in &stats {
             for (idx, bucket) in LATENCY_BUCKETS_MS.iter().enumerate() {
                 output.push_str(&format!(
                     "mizan_gateway_latency_ms_bucket{{{},le=\"{}\"}} {}\n",
@@ -172,6 +171,31 @@ impl MetricsRegistry {
 
         output
     }
+
+    fn snapshot(&self) -> Vec<(GatewayLabels, MetricSet)> {
+        let mut stats = Vec::new();
+        for shard in self.shards.iter() {
+            let inner = shard
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            stats.extend(
+                inner
+                    .stats
+                    .iter()
+                    .map(|(labels, metrics)| (labels.clone(), metrics.clone())),
+            );
+        }
+        stats.sort_by(|(left, _), (right, _)| left.cmp(right));
+        stats
+    }
+}
+
+impl Default for MetricsRegistry {
+    fn default() -> Self {
+        Self {
+            shards: Arc::new(std::array::from_fn(|_| Mutex::new(MetricsInner::default()))),
+        }
+    }
 }
 
 impl GatewayLabels {
@@ -190,7 +214,7 @@ fn append_counter(
     output: &mut String,
     name: &str,
     help: &str,
-    stats: &HashMap<GatewayLabels, MetricSet>,
+    stats: &[(GatewayLabels, MetricSet)],
     value: impl Fn(&MetricSet) -> u64,
 ) {
     output.push_str(&format!("# HELP {name} {help}\n"));
@@ -211,6 +235,28 @@ fn normalize_label(value: String) -> String {
     } else {
         value.to_string()
     }
+}
+
+fn shard_index(labels: &GatewayLabels) -> usize {
+    let mut hash = FNV_OFFSET_BASIS;
+    hash = fnv1a_len_prefixed(hash, labels.route.as_bytes());
+    hash = fnv1a_len_prefixed(hash, labels.provider.as_bytes());
+    hash = fnv1a_len_prefixed(hash, labels.model.as_bytes());
+    hash = fnv1a(hash, &labels.status.to_le_bytes());
+    hash as usize % METRIC_SHARDS
+}
+
+fn fnv1a_len_prefixed(hash: u64, value: &[u8]) -> u64 {
+    let hash = fnv1a(hash, &(value.len() as u64).to_le_bytes());
+    fnv1a(hash, value)
+}
+
+fn fnv1a(mut hash: u64, value: &[u8]) -> u64 {
+    for byte in value {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    hash
 }
 
 fn escape_label(value: &str) -> String {
@@ -322,5 +368,49 @@ mod tests {
         assert!(rendered.contains("route=\"bad\\nroute\""));
         assert!(rendered.contains("provider=\"provider\\\"quote\""));
         assert!(rendered.contains("model=\"model\\\\slash\""));
+    }
+
+    #[test]
+    fn records_metrics_from_concurrent_observers() {
+        let registry = MetricsRegistry::default();
+        let mut handles = Vec::new();
+
+        for _ in 0..8 {
+            let registry = registry.clone();
+            handles.push(std::thread::spawn(move || {
+                for _ in 0..100 {
+                    registry.observe_gateway(GatewayObservation {
+                        route: "public-model".to_string(),
+                        provider: "openai".to_string(),
+                        model: "gpt-test".to_string(),
+                        status: 200,
+                        usage: TokenUsage {
+                            prompt_tokens: 1,
+                            completion_tokens: 1,
+                            total_tokens: 2,
+                            estimated: false,
+                        },
+                        latency_ms: 10,
+                        route_price: RoutePrice {
+                            input_microcredits_per_1m_tokens: 0,
+                            output_microcredits_per_1m_tokens: 0,
+                        },
+                    });
+                }
+            }));
+        }
+
+        for handle in handles {
+            handle.join().expect("metrics worker should not panic");
+        }
+
+        let rendered = registry.render_prometheus();
+
+        assert!(rendered.contains(
+            "mizan_gateway_requests_total{route=\"public-model\",provider=\"openai\",model=\"gpt-test\",status=\"200\"} 800"
+        ));
+        assert!(rendered.contains(
+            "mizan_gateway_tokens_total{route=\"public-model\",provider=\"openai\",model=\"gpt-test\",status=\"200\"} 1600"
+        ));
     }
 }

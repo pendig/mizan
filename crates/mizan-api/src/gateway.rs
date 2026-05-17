@@ -879,6 +879,15 @@ fn build_stream_events(
                                     error = %error,
                                     "failed to persist stream request usage after stream chunk error"
                                 );
+                                observe_gateway_metrics(
+                                    &state.metrics,
+                                    &state.context,
+                                    &state.route_alias,
+                                    usage,
+                                    app_error_status_code(&error),
+                                    latency_ms,
+                                    state.route_price,
+                                );
                                 release_limit_lease(state.limit_lease.take());
                                 return Some((
                                     Ok(Event::default()
@@ -942,6 +951,15 @@ fn build_stream_events(
                                 request_id = %state.context.request_id,
                                 error = %error,
                                 "failed to persist stream request usage"
+                            );
+                            observe_gateway_metrics(
+                                &state.metrics,
+                                &state.context,
+                                &state.route_alias,
+                                usage,
+                                app_error_status_code(&error),
+                                latency_ms,
+                                state.route_price,
                             );
                             release_limit_lease(state.limit_lease.take());
                             return Some((
