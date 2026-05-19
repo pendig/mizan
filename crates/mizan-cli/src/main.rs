@@ -1,92 +1,199 @@
-use std::env;
+use std::io::{self, Write};
 use std::process;
 
+use clap::{Args, CommandFactory, Parser, Subcommand};
+use futures_util::StreamExt;
 use mizan_rtk::{
-    chat_completion_request_with_messages, filter_output, passthrough_filter, ChatProxyConfig,
-    ChatResponse, FilterPolicy, RtkFilterResult,
+    ChatProxyConfig, ChatResponse, FilterPolicy, RtkFilterResult,
+    chat_completion_request_with_messages, filter_output, passthrough_filter, send_chat_completion,
+    send_chat_completion_stream,
 };
 
 #[tokio::main]
 async fn main() {
-    match parse_command() {
-        Ok(Command::Help) => print_usage(),
-        Ok(Command::Filter { input }) => {
-            let result = passthrough_filter(input);
-            println!("{}", result.body);
-        }
-        Ok(Command::Proxy {
-            config,
-            model,
-            messages,
-            stream,
-            compact_output,
-            max_tokens,
-            json_output,
-        }) => {
-            let request = chat_completion_request_with_messages(
-                model,
-                messages,
-                stream,
-                max_tokens,
-            );
+    if let Err(error) = execute().await {
+        eprintln!("error: {error}");
+        process::exit(1);
+    }
+}
 
-            let config = ChatProxyConfig {
-                api_key: config.api_key,
-                base_url: config.base_url,
-                provider_name: config.provider_name,
-            };
-            match response_for(&config, request).await {
-                Ok(response) => {
-                    let policy = FilterPolicy::default();
+async fn execute() -> Result<(), String> {
+    let cli = Cli::parse();
 
-                    let filtered = if compact_output {
-                        filter_output(&response.content, &policy)
-                    } else {
-                        passthrough_filter(&response.content)
-                    };
-                    if json_output {
-                        match serde_json::to_string_pretty(&response_payload(&response, filtered)) {
-                            Ok(json) => println!("{json}"),
-                            Err(error) => {
-                                eprintln!("failed to encode json output: {error}");
-                                process::exit(1);
-                            }
-                        }
-                    } else if compact_output {
-                        if !filtered.body.is_empty() {
-                            println!("{}", filtered.body);
-                        }
-                    } else {
-                        println!("{}", response.content);
-                    }
-                }
-                Err(error) => {
-                    eprintln!("proxy error: {error}");
-                    process::exit(1);
-                }
-            };
-        }
-        Err(error) => {
-            eprintln!("error: {error}");
-            print_usage();
-            process::exit(1);
+    match cli.command {
+        Some(Command::Filter(args)) => run_filter(args),
+        Some(Command::Proxy(args)) => run_proxy(args).await,
+        None => {
+            Cli::command()
+                .print_help()
+                .map_err(|error| error.to_string())?;
+            println!();
+            Ok(())
         }
     }
 }
 
-async fn response_for(
-    config: &ChatProxyConfig,
-    request: mizan_rtk::ChatRequest,
-) -> Result<mizan_rtk::ChatResponse, String> {
-    mizan_rtk::send_chat_completion(config, request)
-        .await
-        .map_err(|error| error.to_string())
+#[derive(Parser)]
+#[command(name = "mizan-cli")]
+#[command(about = "Utilities for RTK-compatible output filtering and proxying")]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
 }
 
-fn response_payload(
-    response: &ChatResponse,
-    filtered: RtkFilterResult,
-) -> serde_json::Value {
+#[derive(Subcommand)]
+enum Command {
+    Filter(FilterArgs),
+    Proxy(ProxyArgs),
+}
+
+#[derive(Args)]
+struct FilterArgs {
+    #[arg(value_name = "TEXT", required = true)]
+    input: Vec<String>,
+}
+
+#[derive(Args)]
+struct ProxyArgs {
+    #[arg(long)]
+    base_url: String,
+    #[arg(long)]
+    api_key: String,
+    #[arg(long)]
+    provider_name: Option<String>,
+    #[arg(long)]
+    model: String,
+    #[arg(long)]
+    message: Vec<String>,
+    #[arg(long)]
+    stream: bool,
+    #[arg(long)]
+    compact: bool,
+    #[arg(long = "max-tokens")]
+    max_tokens: Option<u64>,
+    #[arg(long)]
+    json: bool,
+}
+
+fn run_filter(input: FilterArgs) -> Result<(), String> {
+    let result = passthrough_filter(input.input.join(" "));
+    println!("{}", result.body);
+    Ok(())
+}
+
+async fn run_proxy(args: ProxyArgs) -> Result<(), String> {
+    let request_messages = args
+        .message
+        .into_iter()
+        .map(|content| mizan_rtk::ChatMessage {
+            role: "user".to_owned(),
+            content,
+        })
+        .collect::<Vec<_>>();
+
+    if request_messages.is_empty() {
+        return Err("--message is required".to_owned());
+    }
+
+    let config = ChatProxyConfig {
+        api_key: args.api_key,
+        base_url: args.base_url,
+        provider_name: args.provider_name,
+    };
+
+    let request_model = args.model.clone();
+    let request = chat_completion_request_with_messages(
+        request_model.clone(),
+        request_messages,
+        args.stream,
+        args.max_tokens,
+    );
+
+    if args.stream {
+        run_streaming_proxy(config, request, request_model, args.compact, args.json).await
+    } else {
+        let response = send_chat_completion(&config, request)
+            .await
+            .map_err(|error| error.to_string())?;
+        let filtered = if args.compact {
+            filter_output(&response.content, &FilterPolicy::default())
+        } else {
+            passthrough_filter(&response.content)
+        };
+
+        if args.json {
+            let payload = response_payload(&response, filtered);
+            let encoded =
+                serde_json::to_string_pretty(&payload).map_err(|error| error.to_string())?;
+            println!("{encoded}");
+        } else {
+            println!(
+                "{}",
+                if args.compact {
+                    filtered.body
+                } else {
+                    response.content
+                }
+            );
+        }
+
+        Ok(())
+    }
+}
+
+async fn run_streaming_proxy(
+    config: ChatProxyConfig,
+    request: mizan_rtk::ChatRequest,
+    model: String,
+    compact_output: bool,
+    json_output: bool,
+) -> Result<(), String> {
+    let mut stream = send_chat_completion_stream(&config, request)
+        .await
+        .map_err(|error| error.to_string())?;
+    let mut content = String::new();
+    let mut usage = None;
+    let mut emitted = false;
+
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|error| error.to_string())?;
+        content.push_str(&chunk.delta);
+        if let Some(chunk_usage) = chunk.usage {
+            usage = Some(serde_json::to_value(chunk_usage).map_err(|error| error.to_string())?);
+        }
+
+        if !json_output && !compact_output {
+            print!("{}", chunk.delta);
+            io::stdout().flush().map_err(|error| error.to_string())?;
+            emitted = true;
+        }
+    }
+
+    let filtered = if compact_output {
+        filter_output(&content, &FilterPolicy::default())
+    } else {
+        passthrough_filter(&content)
+    };
+
+    if json_output {
+        let payload = stream_response_payload(&config, model, usage, filtered);
+        let encoded = serde_json::to_string_pretty(&payload).map_err(|error| error.to_string())?;
+        println!("{encoded}");
+        return Ok(());
+    }
+
+    if compact_output {
+        println!("{}", filtered.body);
+        return Ok(());
+    }
+
+    if emitted {
+        println!();
+    }
+    Ok(())
+}
+
+fn response_payload(response: &ChatResponse, filtered: RtkFilterResult) -> serde_json::Value {
     serde_json::json!({
         "provider": response.provider,
         "model": response.model,
@@ -95,165 +202,34 @@ fn response_payload(
         "filter": {
             "filtered": filtered.filtered,
             "original_chars": filtered.original_chars,
-            "output_chars": filtered.output_chars
+            "output_chars": filtered.output_chars,
         }
     })
 }
 
-struct ProxyConfigArgs {
-    base_url: String,
-    api_key: String,
-    provider_name: Option<String>,
-}
-
-enum Command {
-    Help,
-    Filter {
-        input: String,
-    },
-    Proxy {
-        config: ProxyConfigArgs,
-        model: String,
-        messages: Vec<mizan_rtk::ChatMessage>,
-        stream: bool,
-        compact_output: bool,
-        max_tokens: Option<u64>,
-        json_output: bool,
-    },
-}
-
-fn parse_command() -> Result<Command, String> {
-    let mut args = env::args().skip(1).collect::<Vec<_>>();
-    if args.is_empty() {
-        return Ok(Command::Help);
-    }
-
-    let command = args.remove(0);
-    match command.as_str() {
-        "help" | "--help" | "-h" => Ok(Command::Help),
-        "filter" => {
-            if args.is_empty() {
-                return Err("filter requires input text".to_owned());
-            }
-            Ok(Command::Filter {
-                input: args.join(" "),
-            })
+fn stream_response_payload(
+    config: &ChatProxyConfig,
+    model: String,
+    usage: Option<serde_json::Value>,
+    filtered: RtkFilterResult,
+) -> serde_json::Value {
+    serde_json::json!({
+        "provider": config.provider_name.clone().unwrap_or_else(|| provider_fallback_name(&config.base_url)),
+        "model": model,
+        "content": filtered.body,
+        "usage": usage,
+        "filter": {
+            "filtered": filtered.filtered,
+            "original_chars": filtered.original_chars,
+            "output_chars": filtered.output_chars,
         }
-        "proxy" => parse_proxy(&mut args),
-        _ => Err(format!("unknown command: {command}")),
-    }
-}
-
-fn parse_proxy(args: &mut Vec<String>) -> Result<Command, String> {
-    let mut base_url = None;
-    let mut api_key = None;
-    let mut provider_name = None;
-    let mut model = None;
-    let mut messages = Vec::new();
-    let mut stream = false;
-    let mut max_tokens = None;
-    let mut compact_output = false;
-    let mut json_output = false;
-
-    let mut i = 0usize;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--base-url" => {
-                i += 1;
-                base_url = Some(
-                    args.get(i)
-                        .cloned()
-                        .ok_or("--base-url requires value")?,
-                );
-            }
-            "--api-key" => {
-                i += 1;
-                api_key = Some(
-                    args.get(i)
-                        .cloned()
-                        .ok_or("--api-key requires value")?,
-                );
-            }
-            "--provider-name" => {
-                i += 1;
-                provider_name = Some(
-                    args.get(i)
-                        .cloned()
-                        .ok_or("--provider-name requires value")?,
-                );
-            }
-            "--model" => {
-                i += 1;
-                model = Some(args.get(i).cloned().ok_or("--model requires value")?);
-            }
-            "--message" => {
-                i += 1;
-                let value = args
-                    .get(i)
-                    .cloned()
-                    .ok_or("--message requires value")?;
-                messages.push(mizan_rtk::ChatMessage {
-                    role: "user".to_owned(),
-                    content: value,
-                });
-            }
-            "--stream" => {
-                stream = true;
-            }
-            "--json" => {
-                json_output = true;
-            }
-            "--compact" => {
-                compact_output = true;
-            }
-            "--max-tokens" => {
-                i += 1;
-                let raw_value = args.get(i).ok_or("--max-tokens requires value".to_owned())?;
-                max_tokens = Some(
-                    raw_value
-                        .parse::<u64>()
-                        .map_err(|_| format!("invalid --max-tokens value: {raw_value}"))?,
-                );
-            }
-            value => {
-                if value.starts_with('-') {
-                    return Err(format!("unknown argument: {value}"));
-                }
-
-                messages.push(mizan_rtk::ChatMessage {
-                    role: "user".to_owned(),
-                    content: value.to_owned(),
-                });
-            }
-        }
-        i += 1;
-    }
-
-    if model.is_none() {
-        return Err("--model is required".to_owned());
-    }
-    if messages.is_empty() {
-        return Err("--message is required".to_owned());
-    }
-
-    Ok(Command::Proxy {
-        config: ProxyConfigArgs {
-            base_url: base_url.ok_or("--base-url is required".to_owned())?,
-            api_key: api_key.ok_or("--api-key is required".to_owned())?,
-            provider_name,
-        },
-        model: model.expect("model is required"),
-        messages,
-        stream,
-        compact_output,
-        max_tokens,
-        json_output,
     })
 }
 
-fn print_usage() {
-    println!("mizan-cli");
-    println!("Usage:");
-    println!("  mizan-cli filter <text>");
-    println!("  mizan-cli proxy --base-url <url> --api-key <key> --model <model> --message <text> [--provider-name <name>] [--stream] [--max-tokens N] [--compact] [--json]");
+fn provider_fallback_name(base_url: &str) -> String {
+    if base_url.to_ascii_lowercase().contains("openai") {
+        "openai".to_owned()
+    } else {
+        "openai-compatible".to_owned()
+    }
 }

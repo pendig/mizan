@@ -1,13 +1,12 @@
 use mizan_core::{AppResult, RequestContextBuilder};
 use mizan_providers::{
     ChatCompletionStream, ChatMessage, ChatRequest, ChatResponse, OpenAiCompatibleProvider,
+    ProviderAdapter,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 pub type ChatProxyStream = ChatCompletionStream;
-
-pub use mizan_providers::{ChatMessage, ChatRequest, ChatResponse};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatProxyConfig {
@@ -23,10 +22,7 @@ impl ChatProxyConfig {
     }
 }
 
-pub fn chat_completion_request(
-    model: impl Into<String>,
-    prompt: impl Into<String>,
-) -> ChatRequest {
+pub fn chat_completion_request(model: impl Into<String>, prompt: impl Into<String>) -> ChatRequest {
     ChatRequest {
         model: model.into(),
         messages: vec![ChatMessage {
