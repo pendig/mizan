@@ -28,6 +28,9 @@ Not included yet:
 - RTK-backed CLI proxy baseline.
 - Durable request log and admin audit log foundations.
 - Production deployment hardening beyond local smoke validation.
+- OpenAI-compatible `/v1/responses` endpoint.
+- Non-API provider adapters (for Codex/Gemini CLI/Claude-style auth/login flows)
+  before the broader MVP cut.
 
 ## Required Validation
 

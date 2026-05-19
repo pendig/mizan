@@ -12,6 +12,8 @@ models, routes, limits, and accounting rules grows.
 - Keep limit enforcement hot-path and isolated.
 - Keep observability centralized, structured, and consistent.
 - Keep public API responses stable even when upstream providers differ.
+- Normalize all upstream responses into one OpenAI-compatible public contract before
+  returning to clients.
 
 ## Recommended Module Boundaries
 
@@ -74,6 +76,8 @@ Rule:
 
 - Each provider family should be isolated behind a dedicated module. Adding a
   new provider should not require rewriting the gateway.
+- Non-OpenAI upstream formats should be translated here, then shaped as the
+  shared `chat.completions` and `responses` contracts at the edge.
 
 ### `mizan-metering`
 

@@ -13,6 +13,8 @@ Use API endpoints plus scripts:
 - User setup: `POST /auth/register`, `POST /auth/login`, `POST /api-keys`
 - Runtime checks: `GET /v1/models`, `POST /v1/chat/completions`,
   `GET /v1/usage`, `GET /v1/credits`, `GET /metrics`
+- Future extension (next milestone): `POST /v1/responses` with the same
+  OpenAI-compatible shape.
 
 Tradeoff: this is less friendly than a web UI, but it keeps alpha scope small
 and makes correctness easy to validate in CI-like scripts.
@@ -66,6 +68,7 @@ The smoke covers:
 - model listing
 - non-streaming chat
 - streaming chat
+- /v1/responses (when available; tracked in roadmap issue)
 - usage and credit reads
 - Prometheus metrics scrape
 

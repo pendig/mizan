@@ -40,6 +40,8 @@ ledgering, and admin/user APIs.
 - Keep request and response normalization in shared types, not ad hoc structs
   inside route handlers.
 - Keep model registry data separate from provider transport details.
+- Keep all provider outputs normalized into one OpenAI-compatible public contract at
+  the edge (chat completions and responses).
 
 These rules matter because the project will likely support many providers and
 many model aliases. A clean boundary on day one is cheaper than a refactor after
@@ -58,8 +60,8 @@ flowchart LR
     Client["User app or CLI"] --> Gateway["OpenAI-compatible gateway"]
     Gateway --> Auth["API key auth"]
     Auth --> Limits["Redis limits and concurrency leases"]
-    Limits --> Router["Model router"]
-    Router --> Provider["Upstream provider or local model"]
+    Limits --> Router["Model router + provider adapter"]
+    Router --> Provider["Provider adapters: OpenAI API, CLI session, browser session"]
     Provider --> Meter["Usage meter"]
     Meter --> Ledger["Credit ledger"]
     Ledger --> DB["SQLite (default)"]
@@ -72,7 +74,8 @@ flowchart LR
 
 Responsible for:
 
-- OpenAI-compatible request/response surface.
+- OpenAI-compatible request/response surface for `/v1/chat/completions` and
+  `/v1/responses`.
 - Streaming proxy.
 - Request id generation.
 - API key authentication.
@@ -120,8 +123,9 @@ MVP router behavior:
 3. Check route and provider are enabled.
 4. Acquire Redis limit/concurrency leases.
 5. Send request to upstream.
-6. Normalize response and stream back to client.
-7. Record usage and charge credits.
+6. Normalize response into the canonical OpenAI-compatible shape.
+7. Stream or return non-stream response to client.
+8. Record usage and charge credits.
 
 The router should only orchestrate these steps. Provider details, metering
 logic, and wallet updates should live in their own modules.
@@ -145,9 +149,25 @@ pub trait ProviderAdapter: Send + Sync {
     fn name(&self) -> &'static str;
     async fn chat_completions(&self, req: ChatRequest) -> Result<ChatResponse>;
     async fn stream_chat_completions(&self, req: ChatRequest) -> Result<ChatStream>;
+    async fn responses(&self, req: ResponsesRequest) -> Result<ResponsesResponse>;
     async fn models(&self) -> Result<Vec<ProviderModel>>;
 }
 ```
+
+Canonical contract rule:
+
+- Even when upstream transport uses different auth methods (`api_key`, CLI login,
+  browser token/session), provider adapters are responsible for mapping to the
+  same `chat` and `responses` contracts used by clients.
+
+Adapter categories:
+
+- `api_key`: OpenAI-compatible HTTP APIs and local models with stable response
+  shape.
+- `subscription_cli`: session or CLI-based connectors (Codex, Gemini CLI, Claude-like
+  flows) that are normalized by adapter before serialization.
+- `browser_session`: controlled browser session connectors with policy and legal
+  constraints handled in provider registration and runtime guardrails.
 
 Provider connection records should include encrypted secret material. The API
 never returns raw secrets after creation.

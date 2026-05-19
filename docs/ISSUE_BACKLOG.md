@@ -53,15 +53,21 @@ Progress status (current): Milestone 4 completed with non-streaming chat proxy f
 4. Add model route CRUD.
 5. Add `/v1/models`.
 6. Keep provider-specific logic behind adapter modules.
+7. Keep all provider outputs normalized to OpenAI-compatible chat/responses contracts
+   (tracked in Issue #53).
+8. Add non-API provider adapter pattern (`subscription_cli`, session-based)
+   for Codex/Gemini CLI/Claude-like adapters (planned, Issue #53).
 
 ## Gateway
 
 1. Add non-streaming `/v1/chat/completions`.
 2. Add streaming `/v1/chat/completions`.
-3. Normalize upstream errors.
-4. Add request IDs.
-5. Add provider health state.
-6. Keep gateway orchestration separate from metering and ledger code.
+3. Add `POST /v1/responses` and shared response normalization path
+   (tracked in Issue #52).
+4. Normalize upstream errors.
+5. Add request IDs.
+6. Add provider health state.
+7. Keep gateway orchestration separate from metering and ledger code.
 
 ## Credits And Metering
 
