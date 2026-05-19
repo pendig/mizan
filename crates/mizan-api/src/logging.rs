@@ -47,10 +47,7 @@ pub async fn record_request_log(
     let now = unix_timestamp_string();
     let status_code = i64::from(u16::from(input.status_code));
     let latency_ms = i64::try_from(input.latency_ms).map_err(|error| {
-        AppError::invalid_config(
-            "request_log.latency_ms",
-            format!("latency_ms must fit into i64: {error}"),
-        )
+        AppError::infrastructure(format!("request_log.latency_ms exceeds i64 range: {error}"))
     })?;
 
     query(&prepare_sql(

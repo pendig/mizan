@@ -1034,6 +1034,8 @@ fn build_stream_events(
                             ))
                             .await
                             {
+                                let usage_error_code = error_code_from_app_error(&error);
+                                let usage_status = app_error_status_code(&error);
                                 warn!(
                                     request_id = %state.context.request_id,
                                     error = %error,
@@ -1044,10 +1046,10 @@ fn build_stream_events(
                                     state.database_backend,
                                     &state.context,
                                     &state.request_started_at,
-                                    app_error_status_code(&error),
+                                    usage_status,
                                     Some(&state.route_alias),
                                     state.context.provider.as_deref(),
-                                    Some(error_code.as_str()),
+                                    Some(usage_error_code.as_str()),
                                 )
                                 .await;
                                 observe_gateway_metrics(
