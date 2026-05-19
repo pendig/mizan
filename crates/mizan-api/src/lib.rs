@@ -19,6 +19,7 @@ use tracing::{info, warn};
 mod auth;
 mod billing;
 mod gateway;
+mod logging;
 mod metrics;
 mod providers;
 mod storage;

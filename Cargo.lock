@@ -1144,6 +1144,7 @@ dependencies = [
  "mizan-wallet",
  "redis",
  "serde",
+ "serde_json",
  "sha2 0.11.0",
  "sqlx",
  "tokio",

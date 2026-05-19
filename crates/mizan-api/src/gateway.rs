@@ -1,6 +1,7 @@
 use std::convert::Infallible;
 use std::time::Instant;
 
+use crate::logging::{RequestLogInput, error_code_from_app_error, record_request_log};
 use axum::{
     Extension, Json,
     extract::State,
@@ -136,13 +137,24 @@ pub async fn chat_completions(
         .build();
 
     if public_model.is_empty() {
+        let app_error = AppError::invalid_config("chat_completion.model", "model is required");
+        let status = app_error_status_code(&app_error);
+        let error_code = error_code_from_app_error(&app_error);
+        record_gateway_request_completion(
+            &state.database,
+            state.database_backend(),
+            &context,
+            &request_started_at,
+            status,
+            Some(public_model),
+            None,
+            Some(&error_code),
+        )
+        .await;
         return Ok(build_error_response(
             &context,
-            StatusCode::BAD_REQUEST,
-            Json(ErrorEnvelope::from(&AppError::invalid_config(
-                "chat_completion.model",
-                "model is required",
-            ))),
+            status,
+            Json(ErrorEnvelope::from(&app_error)),
         ));
     }
 
@@ -162,7 +174,20 @@ pub async fn chat_completions(
     {
         Ok(route) => route,
         Err(error) => {
-            let (status, body) = from_app_error(error);
+            let status = app_error_status_code(&error);
+            let error_code = error_code_from_app_error(&error);
+            record_gateway_request_completion(
+                &state.database,
+                state.database_backend(),
+                &context,
+                &request_started_at,
+                status,
+                Some(public_model),
+                None,
+                Some(&error_code),
+            )
+            .await;
+            let (_, body) = from_app_error(error);
             return Ok(build_error_response(&context, status, body));
         }
     };
@@ -194,7 +219,20 @@ pub async fn chat_completions(
         match resolve_effective_max_tokens(payload.max_tokens, route.max_tokens) {
             Ok(max_tokens) => max_tokens,
             Err(error) => {
-                let (status, body) = from_app_error(error);
+                let status = app_error_status_code(&error);
+                let error_code = error_code_from_app_error(&error);
+                record_gateway_request_completion(
+                    &state.database,
+                    state.database_backend(),
+                    &context,
+                    &request_started_at,
+                    status,
+                    Some(public_model),
+                    None,
+                    Some(&error_code),
+                )
+                .await;
+                let (_, body) = from_app_error(error);
                 return Ok(build_error_response(&context, status, body));
             }
         };
@@ -216,7 +254,7 @@ pub async fn chat_completions(
     };
     let route_price = route.route_price();
     let provider = OpenAiCompatibleProvider::new(
-        provider_name,
+        provider_name.clone(),
         route.provider_base_url,
         route.provider_api_key.clone(),
     );
@@ -237,6 +275,20 @@ pub async fn chat_completions(
     ))
     .await
     {
+        let status = app_error_status_code(&error);
+        let error_code = error_code_from_app_error(&error);
+        let latency_ms = request_started_at.elapsed().as_millis() as u64;
+        record_gateway_request_completion(
+            &state.database,
+            state.database_backend(),
+            &context,
+            &request_started_at,
+            status,
+            Some(public_model),
+            Some(&provider_name),
+            Some(&error_code),
+        )
+        .await;
         let (status, body) = from_app_error(error);
         if let Err(error) = billing::record_usage(
             &state.database,
@@ -250,7 +302,7 @@ pub async fn chat_completions(
                 model: public_model.to_string(),
                 usage: prompt_only_usage,
                 status_code: status.as_u16(),
-                latency_ms: request_started_at.elapsed().as_millis() as u64,
+                latency_ms,
                 route_price,
             },
         )
@@ -294,14 +346,28 @@ pub async fn chat_completions(
     {
         Ok(lease) => lease,
         Err(error) => {
-            let (status, body) = from_app_error(error);
+            let status = app_error_status_code(&error);
+            let error_code = error_code_from_app_error(&error);
+            let latency_ms = request_started_at.elapsed().as_millis() as u64;
+            record_gateway_request_completion(
+                &state.database,
+                state.database_backend(),
+                &context,
+                &request_started_at,
+                status,
+                Some(public_model),
+                Some(&provider_name),
+                Some(&error_code),
+            )
+            .await;
+            let (_, body) = from_app_error(error);
             observe_gateway_metrics(
                 &state.metrics,
                 &context,
                 public_model,
                 admission_usage,
                 status,
-                request_started_at.elapsed().as_millis() as u64,
+                latency_ms,
                 route_price,
             );
             return Ok(build_error_response(&context, status, body));
@@ -339,9 +405,10 @@ pub async fn chat_completions(
             Err(error) => {
                 let normalized_error =
                     normalize_provider_error(error, &context, public_model.to_string());
+                let error_code = error_code_from_app_error(&normalized_error);
+                let latency_ms = request_started_at.elapsed().as_millis() as u64;
                 let (status, body) = from_app_error(normalized_error);
                 let usage = billing::estimate_usage(&request_messages, "");
-                let latency_ms = request_started_at.elapsed().as_millis() as u64;
                 if let Err(error) = billing::record_usage(
                     &state.database,
                     state.database_backend(),
@@ -382,6 +449,17 @@ pub async fn chat_completions(
                     latency_ms,
                     route_price,
                 );
+                record_gateway_request_completion(
+                    &state.database,
+                    state.database_backend(),
+                    &context,
+                    &request_started_at,
+                    status,
+                    Some(public_model),
+                    Some(&provider_name),
+                    Some(error_code.as_str()),
+                )
+                .await;
                 release_limit_lease(billing_context.limit_lease);
                 return Ok(build_error_response(&context, status, body));
             }
@@ -413,9 +491,10 @@ pub async fn chat_completions(
             Err(error) => {
                 let normalized_error =
                     normalize_provider_error(error, &context, public_model.to_string());
+                let error_code = error_code_from_app_error(&normalized_error);
                 let (status, body) = from_app_error(normalized_error);
-                let usage = billing::estimate_usage(&request_messages, "");
                 let latency_ms = request_started_at.elapsed().as_millis() as u64;
+                let usage = billing::estimate_usage(&request_messages, "");
                 if let Err(error) = billing::record_usage(
                     &state.database,
                     state.database_backend(),
@@ -456,6 +535,17 @@ pub async fn chat_completions(
                     latency_ms,
                     route_price,
                 );
+                record_gateway_request_completion(
+                    &state.database,
+                    state.database_backend(),
+                    &context,
+                    &request_started_at,
+                    status,
+                    Some(public_model),
+                    Some(&provider_name),
+                    Some(error_code.as_str()),
+                )
+                .await;
                 release_limit_lease(Some(limit_lease));
                 return Ok(build_error_response(&context, status, body));
             }
@@ -491,7 +581,9 @@ pub async fn chat_completions(
         ))
         .await
         {
-            let (status, body) = from_app_error(error);
+            let status = app_error_status_code(&error);
+            let error_code = error_code_from_app_error(&error);
+            let (_, body) = from_app_error(error);
             observe_gateway_metrics(
                 &state.metrics,
                 &context,
@@ -501,6 +593,17 @@ pub async fn chat_completions(
                 latency_ms,
                 route_price,
             );
+            record_gateway_request_completion(
+                &state.database,
+                state.database_backend(),
+                &context,
+                &request_started_at,
+                status,
+                Some(public_model),
+                Some(&provider_name),
+                Some(error_code.as_str()),
+            )
+            .await;
             release_limit_lease(Some(limit_lease));
             return Ok(build_error_response(&context, status, body));
         }
@@ -514,6 +617,17 @@ pub async fn chat_completions(
             latency_ms,
             route_price,
         );
+        record_gateway_request_completion(
+            &state.database,
+            state.database_backend(),
+            &context,
+            &request_started_at,
+            StatusCode::OK,
+            Some(public_model),
+            Some(&provider_name),
+            None,
+        )
+        .await;
         let response = json_chat_completion_response(
             &completion_id,
             public_model.to_string(),
@@ -525,6 +639,50 @@ pub async fn chat_completions(
     };
 
     Ok(response)
+}
+
+async fn record_gateway_request_completion(
+    database: &AnyPool,
+    database_backend: DatabaseBackend,
+    context: &RequestContext,
+    request_started_at: &Instant,
+    status: StatusCode,
+    route_alias: Option<&str>,
+    provider_alias: Option<&str>,
+    error_code: Option<&str>,
+) {
+    let route = context
+        .route
+        .clone()
+        .or_else(|| route_alias.map(|value| value.to_string()));
+    let provider = context
+        .provider
+        .clone()
+        .or_else(|| provider_alias.map(|value| value.to_string()));
+    let latency_ms = request_started_at.elapsed().as_millis() as u64;
+
+    if let Err(error) = record_request_log(
+        database,
+        database_backend,
+        &RequestLogInput {
+            request_id: context.request_id,
+            user_id: context.user_id,
+            api_key_id: context.api_key_id,
+            provider_id: context.provider_id,
+            route_id: context.route_id,
+            method: "POST".to_string(),
+            path: "/v1/chat/completions".to_string(),
+            route,
+            provider,
+            status_code: status,
+            latency_ms,
+            error_code: error_code.map(|value| value.to_string()),
+        },
+    )
+    .await
+    {
+        warn!(error = %error, "failed to persist gateway request log");
+    }
 }
 
 async fn acquire_runtime_limits(
@@ -845,6 +1003,7 @@ fn build_stream_events(
                                 state.route_alias.clone(),
                             );
                             let status = app_error_status_code(&error);
+                            let error_code = error_code_from_app_error(&error);
                             let usage = state.latest_usage.take().unwrap_or_else(|| {
                                 billing::estimate_usage(&state.request_messages, "")
                             });
@@ -879,6 +1038,17 @@ fn build_stream_events(
                                     error = %error,
                                     "failed to persist stream request usage after stream chunk error"
                                 );
+                                let _ = record_gateway_request_completion(
+                                    &state.database,
+                                    state.database_backend,
+                                    &state.context,
+                                    &state.request_started_at,
+                                    app_error_status_code(&error),
+                                    Some(&state.route_alias),
+                                    state.context.provider.as_deref(),
+                                    Some(error_code.as_str()),
+                                )
+                                .await;
                                 observe_gateway_metrics(
                                     &state.metrics,
                                     &state.context,
@@ -906,6 +1076,17 @@ fn build_stream_events(
                                 latency_ms,
                                 state.route_price,
                             );
+                            let _ = record_gateway_request_completion(
+                                &state.database,
+                                state.database_backend,
+                                &state.context,
+                                &state.request_started_at,
+                                status,
+                                Some(&state.route_alias),
+                                state.context.provider.as_deref(),
+                                Some(error_code.as_str()),
+                            )
+                            .await;
                             release_limit_lease(state.limit_lease.take());
                             Event::default()
                                 .event("error")
@@ -952,6 +1133,17 @@ fn build_stream_events(
                                 error = %error,
                                 "failed to persist stream request usage"
                             );
+                            let _ = record_gateway_request_completion(
+                                &state.database,
+                                state.database_backend,
+                                &state.context,
+                                &state.request_started_at,
+                                app_error_status_code(&error),
+                                Some(&state.route_alias),
+                                state.context.provider.as_deref(),
+                                Some(error_code_from_app_error(&error).as_str()),
+                            )
+                            .await;
                             observe_gateway_metrics(
                                 &state.metrics,
                                 &state.context,
@@ -979,6 +1171,17 @@ fn build_stream_events(
                             latency_ms,
                             state.route_price,
                         );
+                        let _ = record_gateway_request_completion(
+                            &state.database,
+                            state.database_backend,
+                            &state.context,
+                            &state.request_started_at,
+                            StatusCode::OK,
+                            Some(&state.route_alias),
+                            state.context.provider.as_deref(),
+                            None,
+                        )
+                        .await;
                         release_limit_lease(state.limit_lease.take());
                         Some((Ok(Event::default().data("[DONE]")), state))
                     } else {
