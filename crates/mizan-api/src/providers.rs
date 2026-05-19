@@ -342,7 +342,7 @@ pub async fn create_provider_connection(
         action: AUDIT_ACTION_CREATE_PROVIDER.to_owned(),
         entity_type: AUDIT_ENTITY_PROVIDER.to_owned(),
         entity_id: Some(id.to_string()),
-        payload_json: serialize_payload(&json!({
+        payload_json: serialize_payload(json!({
             "name": name,
             "provider_type": provider_type,
             "base_url": base_url,
@@ -392,7 +392,7 @@ pub async fn delete_provider_connection(
         action: AUDIT_ACTION_DELETE_PROVIDER.to_owned(),
         entity_type: AUDIT_ENTITY_PROVIDER.to_owned(),
         entity_id: Some(id.to_string()),
-        payload_json: serialize_payload(&json!({
+        payload_json: serialize_payload(json!({
             "deleted": true,
         })),
     };
@@ -607,7 +607,7 @@ pub async fn create_model_route(
         action: AUDIT_ACTION_CREATE_MODEL_ROUTE.to_owned(),
         entity_type: AUDIT_ENTITY_MODEL_ROUTE.to_owned(),
         entity_id: Some(id.to_string()),
-        payload_json: serialize_payload(&json!({
+        payload_json: serialize_payload(json!({
             "provider_connection_id": provider_connection_id.to_string(),
             "public_model": public_model,
             "upstream_model": upstream_model,
@@ -659,7 +659,7 @@ pub async fn delete_model_route(
         action: AUDIT_ACTION_DELETE_MODEL_ROUTE.to_owned(),
         entity_type: AUDIT_ENTITY_MODEL_ROUTE.to_owned(),
         entity_id: Some(id.to_string()),
-        payload_json: serialize_payload(&json!({
+        payload_json: serialize_payload(json!({
             "deleted": true,
         })),
     };

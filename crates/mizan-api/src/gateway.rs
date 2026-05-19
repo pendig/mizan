@@ -641,6 +641,7 @@ pub async fn chat_completions(
     Ok(response)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn record_gateway_request_completion(
     database: &AnyPool,
     database_backend: DatabaseBackend,

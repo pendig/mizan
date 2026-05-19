@@ -1,7 +1,6 @@
 use axum::http::StatusCode;
 use mizan_core::{AppError, AppResult, DatabaseBackend};
 use serde::Serialize;
-use serde_json;
 use sqlx::{AnyPool, query};
 use uuid::Uuid;
 

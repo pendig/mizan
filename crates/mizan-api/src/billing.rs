@@ -252,7 +252,7 @@ pub async fn grant_credits(
         action: AUDIT_ACTION_CREDIT_GRANT.to_owned(),
         entity_type: AUDIT_ENTITY_USER.to_owned(),
         entity_id: Some(user_id.to_string()),
-        payload_json: serialize_payload(&json!({
+        payload_json: serialize_payload(json!({
             "amount_microcredits": payload.amount_microcredits,
             "reason": reason,
         })),
