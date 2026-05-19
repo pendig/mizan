@@ -1,9 +1,19 @@
-mod filter;
-mod proxy;
+use serde::{Deserialize, Serialize};
 
-pub use filter::{filter_output, passthrough_filter, FilterPolicy, RtkFilterResult};
-pub use proxy::{
-    ChatProxyConfig, ChatProxyStream, chat_completion_request_with_messages,
-    send_chat_completion, send_chat_completion_stream, ChatMessage, ChatRequest, ChatResponse,
-    chat_completion_request,
-};
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RtkFilterResult {
+    pub original_bytes: usize,
+    pub filtered_bytes: usize,
+    pub body: String,
+}
+
+pub fn passthrough_filter(output: impl Into<String>) -> RtkFilterResult {
+    let body = output.into();
+    let size = body.len();
+
+    RtkFilterResult {
+        original_bytes: size,
+        filtered_bytes: size,
+        body,
+    }
+}

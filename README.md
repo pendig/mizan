@@ -49,7 +49,6 @@ accounting unit used by the gateway to meter and control usage.
 - [Runtime Limit Testing](docs/LIMIT_TESTING.md)
 - [Alpha Runbook](docs/ALPHA_RUNBOOK.md)
 - [RTK Base Strategy](docs/RTK_BASE_STRATEGY.md)
-- [RTK Baseline Attestation](docs/RTK_BASELINE_ATTESTATION.md)
 - [Research Notes](docs/RESEARCH.md)
 - [Name Options](docs/NAME_OPTIONS.md)
 - [Initial Issue Backlog](docs/ISSUE_BACKLOG.md)
