@@ -159,6 +159,15 @@ single public shape before calling the route handler:
 Non-API adapters are intentionally phased and should not change the contract
 surface above.
 
+Provider registration tracks the intended auth family up front:
+
+- `api_key` is runnable in the current gateway.
+- `subscription_cli` and `browser_session` are registration-safe foundation
+  modes that store only non-secret metadata/reference JSON until their runtime
+  adapters are implemented.
+- Raw tokens, passwords, cookies, or refresh tokens must not be accepted in
+  provider registration payloads.
+
 ### Model Routes
 
 Each route contains:

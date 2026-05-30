@@ -64,6 +64,8 @@ pub struct ProviderConnectionRecord {
     pub id: Uuid,
     pub name: String,
     pub provider_type: String,
+    pub auth_mode: String,
+    pub auth_config_json: Option<String>,
     pub base_url: String,
     pub api_key_encrypted: String,
     pub enabled: bool,

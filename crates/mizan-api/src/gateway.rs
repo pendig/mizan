@@ -47,6 +47,7 @@ const CHAT_COMPLETIONS_MAX_TOKENS_FIELD: &str = "chat_completion.max_tokens";
 const RESPONSES_MODEL_FIELD: &str = "responses.model";
 const RESPONSES_STREAM_FIELD: &str = "responses.stream";
 const RESPONSES_MAX_TOKENS_FIELD: &str = "responses.max_tokens";
+const PROVIDER_AUTH_MODE_API_KEY: &str = "api_key";
 
 #[derive(Clone, Copy, Debug)]
 struct GatewayRequestSpec {
@@ -1342,6 +1343,7 @@ async fn resolve_model_route(
         id: String,
         upstream_model: String,
         provider_type: String,
+        provider_auth_mode: String,
         #[sqlx(rename = "provider_connection_id")]
         provider_connection_id: String,
         provider_base_url: String,
@@ -1357,6 +1359,7 @@ async fn resolve_model_route(
         "SELECT mr.id AS route_id,
                 mr.upstream_model,
                 pc.provider_type,
+                pc.auth_mode AS provider_auth_mode,
                 pc.id AS provider_connection_id,
                 pc.base_url AS provider_base_url,
                 pc.api_key_encrypted AS provider_api_key_encrypted,
@@ -1379,6 +1382,7 @@ async fn resolve_model_route(
     let route_id = resolved.id;
     let upstream_model = resolved.upstream_model;
     let provider_type = resolved.provider_type;
+    let provider_auth_mode = resolved.provider_auth_mode;
     let provider_connection_id = resolved.provider_connection_id;
     let provider_base_url = resolved.provider_base_url;
     let encrypted_api_key = resolved.provider_api_key_encrypted;
@@ -1393,6 +1397,12 @@ async fn resolve_model_route(
             "stored provider connection id for route is invalid: {error}"
         ))
     })?;
+    if provider_auth_mode != PROVIDER_AUTH_MODE_API_KEY {
+        return Err(AppError::invalid_config(
+            "provider_connection.auth_mode",
+            format!("provider auth mode `{provider_auth_mode}` is registered but not runnable yet"),
+        ));
+    }
     let provider_secret_key = provider_secret_key.ok_or_else(|| {
         AppError::invalid_config(
             "MIZAN_PROVIDER_SECRET_KEY",

@@ -6,7 +6,7 @@ use axum::middleware::Next;
 use axum::response::Response;
 use mizan_core::{AppError, ErrorEnvelope};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{Value, json};
 use sqlx::{query, query_as};
 use tracing::warn;
 use uuid::Uuid;
@@ -26,12 +26,16 @@ const AUDIT_ACTION_CREATE_MODEL_ROUTE: &str = "model_route_created";
 const AUDIT_ACTION_DELETE_MODEL_ROUTE: &str = "model_route_deleted";
 const AUDIT_ENTITY_PROVIDER: &str = "provider_connection";
 const AUDIT_ENTITY_MODEL_ROUTE: &str = "model_route";
+const AUTH_MODE_API_KEY: &str = "api_key";
+const AUTH_MODE_SUBSCRIPTION_CLI: &str = "subscription_cli";
+const AUTH_MODE_BROWSER_SESSION: &str = "browser_session";
 
 #[derive(Debug, Serialize)]
 pub struct ProviderConnectionResponse {
     pub id: String,
     pub name: String,
     pub provider_type: String,
+    pub auth_mode: String,
     pub base_url: String,
     pub enabled: bool,
     pub created_at: String,
@@ -48,6 +52,7 @@ pub struct ProviderConnectionCreateResponse {
     pub id: String,
     pub name: String,
     pub provider_type: String,
+    pub auth_mode: String,
     pub base_url: String,
     pub enabled: bool,
 }
@@ -62,8 +67,10 @@ pub struct ProviderConnectionWithStatus {
 pub struct ProviderConnectionCreateRequest {
     pub name: String,
     pub provider_type: String,
-    pub base_url: String,
-    pub api_key_encrypted: String,
+    pub base_url: Option<String>,
+    pub api_key_encrypted: Option<String>,
+    pub auth_mode: Option<String>,
+    pub auth_config_json: Option<Value>,
     pub enabled: Option<bool>,
 }
 
@@ -154,6 +161,62 @@ pub async fn require_admin_role(
     Ok(next.run(request).await)
 }
 
+fn normalize_auth_mode(raw_mode: Option<&str>) -> Result<&'static str, AppError> {
+    let mode = raw_mode
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(AUTH_MODE_API_KEY);
+
+    match mode {
+        AUTH_MODE_API_KEY => Ok(AUTH_MODE_API_KEY),
+        AUTH_MODE_SUBSCRIPTION_CLI => Ok(AUTH_MODE_SUBSCRIPTION_CLI),
+        AUTH_MODE_BROWSER_SESSION => Ok(AUTH_MODE_BROWSER_SESSION),
+        _ => Err(AppError::invalid_config(
+            "provider_connection.auth_mode",
+            "auth_mode must be api_key, subscription_cli, or browser_session",
+        )),
+    }
+}
+
+fn normalize_auth_config(
+    auth_mode: &str,
+    raw_config: Option<&Value>,
+) -> Result<Option<String>, AppError> {
+    if auth_mode == AUTH_MODE_API_KEY {
+        return Ok(None);
+    }
+
+    let Some(config) = raw_config else {
+        return Err(AppError::invalid_config(
+            "provider_connection.auth_config_json",
+            "auth_config_json is required for non-api provider auth modes",
+        ));
+    };
+
+    let Some(config_object) = config.as_object() else {
+        return Err(AppError::invalid_config(
+            "provider_connection.auth_config_json",
+            "auth_config_json must be a JSON object",
+        ));
+    };
+
+    for forbidden_key in ["api_key", "access_token", "refresh_token", "password"] {
+        if config_object.contains_key(forbidden_key) {
+            return Err(AppError::invalid_config(
+                "provider_connection.auth_config_json",
+                "auth_config_json must store references or non-secret metadata, not raw secrets",
+            ));
+        }
+    }
+
+    serde_json::to_string(config).map(Some).map_err(|error| {
+        AppError::invalid_config(
+            "provider_connection.auth_config_json",
+            format!("auth_config_json is not serializable: {error}"),
+        )
+    })
+}
+
 pub async fn list_models(
     State(state): State<AppState>,
 ) -> ProviderHttpResult<Json<PublicModelsResponse>> {
@@ -214,30 +277,33 @@ pub async fn list_models(
 pub async fn list_provider_connections(
     State(state): State<AppState>,
 ) -> ProviderHttpResult<Json<ProviderConnectionListResponse>> {
-    let rows = query_as::<_, (String, String, String, String, i64, String, String)>(&prepare_sql(
-        state.database_backend(),
-        "SELECT id,
+    let rows =
+        query_as::<_, (String, String, String, String, String, i64, String, String)>(&prepare_sql(
+            state.database_backend(),
+            "SELECT id,
                     name,
                     provider_type,
+                    auth_mode,
                     base_url,
                     enabled,
                     created_at,
                     updated_at
              FROM provider_connections
              ORDER BY created_at DESC",
-    ))
-    .fetch_all(&state.database)
-    .await
-    .map_err(|error| from_app_error(AppError::infrastructure(error.to_string())))?;
+        ))
+        .fetch_all(&state.database)
+        .await
+        .map_err(|error| from_app_error(AppError::infrastructure(error.to_string())))?;
 
     let data = rows
         .into_iter()
         .map(
-            |(id, name, provider_type, base_url, enabled, created_at, updated_at)| {
+            |(id, name, provider_type, auth_mode, base_url, enabled, created_at, updated_at)| {
                 ProviderConnectionResponse {
                     id,
                     name,
                     provider_type,
+                    auth_mode,
                     base_url,
                     enabled: is_enabled(enabled),
                     created_at,
@@ -257,8 +323,20 @@ pub async fn create_provider_connection(
 ) -> ProviderHttpResult<Json<ProviderConnectionCreateResponse>> {
     let name = payload.name.trim();
     let provider_type = payload.provider_type.trim();
-    let base_url = payload.base_url.trim();
-    let secret = payload.api_key_encrypted.trim();
+    let auth_mode = normalize_auth_mode(payload.auth_mode.as_deref()).map_err(from_app_error)?;
+    let base_url = payload
+        .base_url
+        .as_deref()
+        .unwrap_or_default()
+        .trim()
+        .to_owned();
+    let secret = payload
+        .api_key_encrypted
+        .as_deref()
+        .unwrap_or_default()
+        .trim();
+    let auth_config_json = normalize_auth_config(auth_mode, payload.auth_config_json.as_ref())
+        .map_err(from_app_error)?;
 
     if name.is_empty() {
         return Err((
@@ -280,22 +358,22 @@ pub async fn create_provider_connection(
         ));
     }
 
-    if base_url.is_empty() {
+    if auth_mode == AUTH_MODE_API_KEY && base_url.is_empty() {
         return Err((
             StatusCode::BAD_REQUEST,
             Json(ErrorEnvelope::from(&AppError::invalid_config(
                 "provider_connection.base_url",
-                "base_url is required",
+                "base_url is required for api_key provider connections",
             ))),
         ));
     }
 
-    if secret.is_empty() {
+    if auth_mode == AUTH_MODE_API_KEY && secret.is_empty() {
         return Err((
             StatusCode::BAD_REQUEST,
             Json(ErrorEnvelope::from(&AppError::invalid_config(
                 "provider_connection.api_key_encrypted",
-                "api_key_encrypted is required",
+                "api_key_encrypted is required for api_key provider connections",
             ))),
         ));
     }
@@ -309,21 +387,29 @@ pub async fn create_provider_connection(
             "set MIZAN_PROVIDER_SECRET_KEY before creating provider connections",
         ))
     })?;
-    let encrypted_api_key = encrypt_provider_api_key(provider_secret_key, &id.to_string(), secret)
-        .map_err(from_app_error)?;
+    let secret_material = if auth_mode == AUTH_MODE_API_KEY {
+        secret
+    } else {
+        ""
+    };
+    let encrypted_api_key =
+        encrypt_provider_api_key(provider_secret_key, &id.to_string(), secret_material)
+            .map_err(from_app_error)?;
 
     let sql = prepare_sql(
         state.database_backend(),
         "INSERT INTO provider_connections (
-             id, name, provider_type, base_url, api_key_encrypted, enabled, created_at, updated_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+             id, name, provider_type, auth_mode, auth_config_json, base_url, api_key_encrypted, enabled, created_at, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     );
 
     query(&sql)
         .bind(id.to_string())
         .bind(name)
         .bind(provider_type)
-        .bind(base_url)
+        .bind(auth_mode)
+        .bind(auth_config_json.as_deref())
+        .bind(&base_url)
         .bind(encrypted_api_key)
         .bind(if enabled { 1 } else { 0 })
         .bind(&now)
@@ -345,9 +431,10 @@ pub async fn create_provider_connection(
         payload_json: serialize_payload(json!({
             "name": name,
             "provider_type": provider_type,
+            "auth_mode": auth_mode,
             "base_url": base_url,
             "enabled": enabled,
-            "api_key_stored": true,
+            "secret_material_stored": auth_mode == AUTH_MODE_API_KEY,
         })),
     };
     if let Err(error) = record_admin_audit(&state.database, state.database_backend(), &audit).await
@@ -359,7 +446,8 @@ pub async fn create_provider_connection(
         id: id.to_string(),
         name: name.to_string(),
         provider_type: provider_type.to_string(),
-        base_url: base_url.to_string(),
+        auth_mode: auth_mode.to_string(),
+        base_url,
         enabled,
     }))
 }
@@ -690,5 +778,44 @@ fn map_duplicate_model_error(error: String) -> AppError {
         AppError::invalid_config("model_route.public_model", "public_model must be unique")
     } else {
         AppError::infrastructure(error)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_auth_mode_defaults_to_api_key() {
+        assert_eq!(normalize_auth_mode(None).unwrap(), AUTH_MODE_API_KEY);
+        assert_eq!(
+            normalize_auth_mode(Some(" api_key ")).unwrap(),
+            AUTH_MODE_API_KEY
+        );
+    }
+
+    #[test]
+    fn normalize_auth_config_rejects_raw_secret_fields() {
+        let config = json!({
+            "cli": "gemini",
+            "access_token": "secret"
+        });
+
+        assert!(normalize_auth_config(AUTH_MODE_SUBSCRIPTION_CLI, Some(&config)).is_err());
+    }
+
+    #[test]
+    fn normalize_auth_config_accepts_non_secret_reference_metadata() {
+        let config = json!({
+            "cli": "gemini",
+            "profile": "default",
+            "credential_ref": "keychain://mizan/gemini/default"
+        });
+
+        let normalized = normalize_auth_config(AUTH_MODE_SUBSCRIPTION_CLI, Some(&config))
+            .expect("normalize non-secret auth config")
+            .expect("non-api auth config should be stored");
+
+        assert!(normalized.contains("credential_ref"));
     }
 }
