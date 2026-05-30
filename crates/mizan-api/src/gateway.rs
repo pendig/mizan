@@ -133,6 +133,8 @@ pub async fn chat_completions(
         .api_key_id(identity.api_key_id)
         .request_id(request_id)
         .trace_id(trace_id)
+        .method("POST")
+        .path("/v1/chat/completions")
         .streaming(payload.stream)
         .build();
 
@@ -200,6 +202,8 @@ pub async fn chat_completions(
         .trace_id(trace_id)
         .route(public_model.to_string())
         .route_id(route.id)
+        .method("POST")
+        .path("/v1/chat/completions")
         .provider_id(route.provider_connection_id)
         .model(route.upstream_model.clone())
         .streaming(payload.stream)
@@ -671,8 +675,11 @@ async fn record_gateway_request_completion(
             api_key_id: context.api_key_id,
             provider_id: context.provider_id,
             route_id: context.route_id,
-            method: "POST".to_string(),
-            path: "/v1/chat/completions".to_string(),
+            method: context.method.clone().unwrap_or_else(|| "POST".to_owned()),
+            path: context
+                .path
+                .clone()
+                .unwrap_or_else(|| "/v1/chat/completions".to_owned()),
             route,
             provider,
             status_code: status,
