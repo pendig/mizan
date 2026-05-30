@@ -27,7 +27,7 @@ Not included yet:
 
 - Stable/full release guarantee.
 - RTK-backed CLI proxy baseline.
-- Durable request log and admin audit log foundations.
+- Centralized gateway logging middleware refactor.
 - Production deployment hardening beyond local smoke validation.
 - Non-API provider adapters (for Codex/Gemini CLI/Claude-style auth/login flows)
   before the broader MVP cut.
