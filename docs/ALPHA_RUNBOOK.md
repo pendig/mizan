@@ -68,6 +68,7 @@ The smoke covers:
 - model route creation
 - credit grant
 - model listing
+- model sync helper against the mock upstream
 - non-streaming chat
 - streaming chat
 - /v1/responses (when available; tracked in roadmap issue)

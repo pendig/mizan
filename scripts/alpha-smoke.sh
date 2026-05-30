@@ -86,6 +86,13 @@ curl -fsS -X POST "${BASE_URL}/admin/users/${admin_user_id}/credits/grant" \
 
 echo "Checking models, non-stream chat, stream chat, usage, credits, and metrics"
 curl -fsS "${BASE_URL}/v1/models" -H "authorization: Bearer ${api_key}" >/dev/null
+echo "Syncing upstream model list"
+synced_models="$(
+  MODEL_SYNC_BASE_URL="${MOCK_URL}" \
+  MODEL_SYNC_API_KEY="alpha-smoke" \
+  bash scripts/model-sync.sh --format ids
+)"
+printf '%s\n' "${synced_models}" | grep -q '^mock-gpt$'
 curl -fsS -X POST "${BASE_URL}/v1/chat/completions" \
   -H "authorization: Bearer ${api_key}" \
   -H 'content-type: application/json' \
