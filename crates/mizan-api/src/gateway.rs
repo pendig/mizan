@@ -666,31 +666,30 @@ async fn record_gateway_request_completion(
         .or_else(|| provider_alias.map(|value| value.to_string()));
     let latency_ms = request_started_at.elapsed().as_millis() as u64;
 
-    if let Err(error) = record_request_log(
-        database,
-        database_backend,
-        &RequestLogInput {
-            request_id: context.request_id,
-            user_id: context.user_id,
-            api_key_id: context.api_key_id,
-            provider_id: context.provider_id,
-            route_id: context.route_id,
-            method: context.method.clone().unwrap_or_else(|| "POST".to_owned()),
-            path: context
-                .path
-                .clone()
-                .unwrap_or_else(|| "/v1/chat/completions".to_owned()),
-            route,
-            provider,
-            status_code: status,
-            latency_ms,
-            error_code: error_code.map(|value| value.to_string()),
-        },
-    )
-    .await
-    {
-        warn!(error = %error, "failed to persist gateway request log");
-    }
+    let database = database.clone();
+    let request_log = RequestLogInput {
+        request_id: context.request_id,
+        user_id: context.user_id,
+        api_key_id: context.api_key_id,
+        provider_id: context.provider_id,
+        route_id: context.route_id,
+        method: context.method.clone().unwrap_or_else(|| "POST".to_owned()),
+        path: context
+            .path
+            .clone()
+            .unwrap_or_else(|| "/v1/chat/completions".to_owned()),
+        route,
+        provider,
+        status_code: status,
+        latency_ms,
+        error_code: error_code.map(|value| value.to_string()),
+    };
+
+    let _request_log_task = task::spawn(async move {
+        if let Err(error) = record_request_log(&database, database_backend, &request_log).await {
+            warn!(error = %error, "failed to persist gateway request log");
+        }
+    });
 }
 
 async fn acquire_runtime_limits(
