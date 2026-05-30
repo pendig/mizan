@@ -1,19 +1,9 @@
-use serde::{Deserialize, Serialize};
+mod filter;
+mod proxy;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RtkFilterResult {
-    pub original_bytes: usize,
-    pub filtered_bytes: usize,
-    pub body: String,
-}
-
-pub fn passthrough_filter(output: impl Into<String>) -> RtkFilterResult {
-    let body = output.into();
-    let size = body.len();
-
-    RtkFilterResult {
-        original_bytes: size,
-        filtered_bytes: size,
-        body,
-    }
-}
+pub use filter::{FilterPolicy, RtkFilterResult, filter_output, passthrough_filter};
+pub use mizan_providers::{ChatMessage, ChatRequest, ChatResponse};
+pub use proxy::{
+    ChatProxyConfig, ChatProxyStream, chat_completion_request,
+    chat_completion_request_with_messages, send_chat_completion, send_chat_completion_stream,
+};

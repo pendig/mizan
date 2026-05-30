@@ -8,3 +8,7 @@ rust-version.workspace = true
 
 [dependencies]
 serde.workspace = true
+mizan-core = { path = "../mizan-core" }
+mizan-providers = { path = "../mizan-providers" }
+tokio.workspace = true
+uuid = { workspace = true }
