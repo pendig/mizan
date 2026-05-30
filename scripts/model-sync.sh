@@ -63,12 +63,34 @@ response="$(
     "${url}"
 )"
 
-jq -e '.object == "list" and (.data | type == "array")' >/dev/null <<<"${response}"
-count="$(jq '.data | length' <<<"${response}")"
-echo "synced ${count} models from ${url}" >&2
+MODEL_SYNC_RESPONSE="${response}" python3 - "$format" "$url" <<'PY'
+import json
+import os
+import sys
 
-if [[ "${format}" == "json" ]]; then
-  printf '%s\n' "${response}" | jq .
-else
-  printf '%s\n' "${response}" | jq -r '.data[].id' | sort -u
-fi
+format = sys.argv[1]
+url = sys.argv[2]
+payload = json.loads(os.environ["MODEL_SYNC_RESPONSE"])
+
+if payload.get("object") != "list" or not isinstance(payload.get("data"), list):
+    print("error: invalid model list response", file=sys.stderr)
+    raise SystemExit(1)
+
+models = payload["data"]
+print(f"synced {len(models)} models from {url}", file=sys.stderr)
+
+if format == "json":
+    json.dump(payload, sys.stdout, indent=2)
+    sys.stdout.write("\n")
+else:
+    if format != "ids":
+        print(f"error: unsupported format: {format}", file=sys.stderr)
+        raise SystemExit(2)
+
+    for model_id in sorted({
+        item.get("id")
+        for item in models
+        if isinstance(item, dict) and item.get("id")
+    }):
+        print(model_id)
+PY

@@ -6,6 +6,30 @@ use uuid::Uuid;
 
 use crate::utils::{prepare_sql, unix_timestamp_string};
 
+const UUID_TEXT_BUFFER_LEN: usize = uuid::fmt::Urn::LENGTH;
+
+#[derive(Debug, Clone, Copy)]
+struct UuidText {
+    buf: [u8; UUID_TEXT_BUFFER_LEN],
+    len: usize,
+}
+
+impl UuidText {
+    fn new(value: Uuid) -> Self {
+        let mut buf = Uuid::encode_buffer();
+        let len = {
+            let encoded = value.hyphenated().encode_lower(&mut buf);
+            encoded.len()
+        };
+
+        Self { buf, len }
+    }
+
+    fn as_str(&self) -> &str {
+        std::str::from_utf8(&self.buf[..self.len]).expect("uuid text buffer must be valid utf8")
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct RequestLogInput {
     pub request_id: Uuid,
@@ -49,6 +73,12 @@ pub async fn record_request_log(
     let latency_ms = i64::try_from(input.latency_ms).map_err(|error| {
         AppError::infrastructure(format!("request_log.latency_ms exceeds i64 range: {error}"))
     })?;
+    let id = UuidText::new(Uuid::now_v7());
+    let request_id = UuidText::new(input.request_id);
+    let user_id = input.user_id.map(UuidText::new);
+    let api_key_id = input.api_key_id.map(UuidText::new);
+    let provider_id = input.provider_id.map(UuidText::new);
+    let route_id = input.route_id.map(UuidText::new);
 
     query(&prepare_sql(
         database_backend,
@@ -69,12 +99,12 @@ pub async fn record_request_log(
             created_at
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     ))
-    .bind(Uuid::now_v7().to_string())
-    .bind(input.request_id.to_string())
-    .bind(input.user_id.map(|value| value.to_string()))
-    .bind(input.api_key_id.map(|value| value.to_string()))
-    .bind(input.provider_id.map(|value| value.to_string()))
-    .bind(input.route_id.map(|value| value.to_string()))
+    .bind(id.as_str())
+    .bind(request_id.as_str())
+    .bind(user_id.as_ref().map(UuidText::as_str))
+    .bind(api_key_id.as_ref().map(UuidText::as_str))
+    .bind(provider_id.as_ref().map(UuidText::as_str))
+    .bind(route_id.as_ref().map(UuidText::as_str))
     .bind(&input.method)
     .bind(&input.path)
     .bind(input.route.as_ref())
@@ -96,6 +126,8 @@ pub async fn record_admin_audit(
     input: &AdminAuditInput,
 ) -> AppResult<()> {
     let now = unix_timestamp_string();
+    let id = UuidText::new(Uuid::now_v7());
+    let actor_user_id = input.actor_user_id.map(UuidText::new);
 
     query(&prepare_sql(
         database_backend,
@@ -109,8 +141,8 @@ pub async fn record_admin_audit(
             created_at
         ) VALUES (?, ?, ?, ?, ?, ?, ?)",
     ))
-    .bind(Uuid::now_v7().to_string())
-    .bind(input.actor_user_id.map(|value| value.to_string()))
+    .bind(id.as_str())
+    .bind(actor_user_id.as_ref().map(UuidText::as_str))
     .bind(&input.action)
     .bind(&input.entity_type)
     .bind(&input.entity_id)
@@ -133,6 +165,13 @@ mod tests {
     struct SamplePayload {
         id: u32,
         note: String,
+    }
+
+    #[test]
+    fn uuid_text_renders_hyphenated_uuid() {
+        let text = UuidText::new(Uuid::nil());
+
+        assert_eq!(text.as_str(), "00000000-0000-0000-0000-000000000000");
     }
 
     async fn test_database() -> AnyPool {

@@ -72,6 +72,7 @@ metrics scraping.
 Manual local validation on 2026-05-30 also confirmed:
 
 - `scripts/model-sync.sh` can sync the upstream mock model list.
+- `scripts/model-sync.sh` now parses JSON with `python3` instead of `jq`.
 - The local `/v1/models` response is OpenAI-compatible and exposes the route-backed model list.
 - Non-streaming and streaming `POST /v1/chat/completions` work against the route-backed provider.
 - Usage and credit reads return after the completed requests.
@@ -82,4 +83,4 @@ These issues do not block the backend/API alpha pre-release, but they should
 block a broader MVP or stable release:
 
 - Issue #11: integrate the RTK baseline into `mizan-rtk`.
-- Issue #7: add request log and admin audit storage foundations.
+- Issue #51: refactor gateway logging flow to a centralized middleware pattern.
