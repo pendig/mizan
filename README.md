@@ -13,11 +13,12 @@ runtime limit engine before building a large dashboard.
 
 ## Status
 
-Mizan is ready for a backend/API-focused `v0.1.0-alpha.1` pre-release. The
-alpha surface includes SQLite-first storage, auth and virtual API keys,
+Mizan is ready for a backend/API-focused `v0.1.0` release candidate. The
+release surface includes SQLite-first storage, auth and virtual API keys,
 provider/model routing, OpenAI-compatible non-streaming and streaming chat,
-usage metering, credit ledger updates, Redis runtime limits, and Prometheus
-gateway metrics.
+OpenAI-compatible non-streaming responses, usage metering, credit ledger
+updates, Redis runtime limits, request/admin audit log foundations, RTK CLI
+baseline tooling, provider auth-mode metadata, and Prometheus gateway metrics.
 
 The long-term contract is:
 
@@ -29,9 +30,10 @@ The long-term contract is:
 - Add non-API provider runtime adapters later without changing the public
   OpenAI-compatible surface.
 
-This is not a stable/full release yet. The remaining tracked work before a
-broader MVP is completing the provider adapter contract for non-API runtime
-families.
+The stable `v0.1.0` boundary is backend/API-first. Non-API runtime adapters for
+subscription CLI or browser-session providers remain follow-up work; their
+registration metadata is already represented so they can be added without
+changing the public OpenAI-compatible client contract.
 
 ## MVP Scope
 
@@ -57,6 +59,7 @@ accounting unit used by the gateway to meter and control usage.
 - [Engineering Principles](docs/ENGINEERING_PRINCIPLES.md)
 - [MVP Roadmap](docs/MVP_ROADMAP.md)
 - [Backend Implementation Plan](docs/BACKEND_IMPLEMENTATION_PLAN.md)
+- [v0.1.0 Release Readiness](docs/RELEASE_0_1_0.md)
 - [Alpha 1 Readiness](docs/ALPHA_1_READINESS.md)
 - [Runtime Limit Testing](docs/LIMIT_TESTING.md)
 - [Alpha Runbook](docs/ALPHA_RUNBOOK.md)
