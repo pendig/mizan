@@ -16,7 +16,8 @@ Use API endpoints plus scripts:
 - Future extension (next milestone): `POST /v1/responses` with the same
   OpenAI-compatible shape.
 - Model sync helper: `MODEL_SYNC_BASE_URL=... MODEL_SYNC_API_KEY=... scripts/model-sync.sh`
-  for syncing OpenAI-compatible model ids from an upstream provider.
+  for syncing OpenAI-compatible model ids from an upstream provider. The
+  helper uses `python3` for JSON parsing, so `jq` is not required.
 
 Tradeoff: this is less friendly than a web UI, but it keeps alpha scope small
 and makes correctness easy to validate in CI-like scripts.
