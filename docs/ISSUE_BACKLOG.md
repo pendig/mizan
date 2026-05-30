@@ -53,6 +53,10 @@ Progress status (current): Milestone 4 completed with non-streaming chat proxy f
 4. Add model route CRUD.
 5. Add `/v1/models`.
 6. Keep provider-specific logic behind adapter modules.
+7. Keep all provider outputs normalized to OpenAI-compatible chat/responses contracts
+   (tracked in Issue #53).
+8. Add non-API provider adapter pattern (`subscription_cli`, session-based)
+   for Codex/Gemini CLI/Claude-like adapters (planned, Issue #53).
 
 ## Gateway
 

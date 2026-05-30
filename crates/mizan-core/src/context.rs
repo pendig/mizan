@@ -11,6 +11,8 @@ pub struct RequestContext {
     pub provider_id: Option<Uuid>,
     pub route: Option<String>,
     pub route_id: Option<Uuid>,
+    pub method: Option<String>,
+    pub path: Option<String>,
     pub model: Option<String>,
     pub streaming: bool,
 }
@@ -28,6 +30,8 @@ impl RequestContext {
             provider_id: None,
             route: None,
             route_id: None,
+            method: None,
+            path: None,
             model: None,
             streaming: false,
         }
@@ -87,6 +91,16 @@ impl RequestContextBuilder {
 
     pub fn route_id(mut self, route_id: Uuid) -> Self {
         self.context.route_id = Some(route_id);
+        self
+    }
+
+    pub fn method(mut self, method: impl Into<String>) -> Self {
+        self.context.method = Some(method.into());
+        self
+    }
+
+    pub fn path(mut self, path: impl Into<String>) -> Self {
+        self.context.path = Some(path.into());
         self
     }
 

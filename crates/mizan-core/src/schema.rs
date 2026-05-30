@@ -133,7 +133,11 @@ pub struct RequestLogRecord {
     pub route_id: Option<Uuid>,
     pub method: String,
     pub path: String,
+    pub route: Option<String>,
+    pub provider: Option<String>,
     pub status_code: i64,
+    pub latency_ms: i64,
+    pub error_code: Option<String>,
     pub created_at: String,
 }
 

@@ -1,22 +1,31 @@
 use axum::Json;
 use axum::body::Body;
-use axum::extract::{Path, State};
+use axum::extract::{Extension, Path, State};
 use axum::http::StatusCode;
 use axum::middleware::Next;
 use axum::response::Response;
 use mizan_core::{AppError, ErrorEnvelope};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use sqlx::{query, query_as};
+use tracing::warn;
 use uuid::Uuid;
 
 use crate::AppState;
 use crate::auth::ApiKeyIdentity;
+use crate::logging::{AdminAuditInput, record_admin_audit, serialize_payload};
 use crate::utils::{
     encrypt_provider_api_key, from_app_error, is_enabled, is_unique_constraint_error,
     parse_timestamp, prepare_sql, unix_timestamp_string,
 };
 
 type ProviderHttpResult<T> = Result<T, (StatusCode, Json<ErrorEnvelope>)>;
+const AUDIT_ACTION_CREATE_PROVIDER: &str = "provider_connection_created";
+const AUDIT_ACTION_DELETE_PROVIDER: &str = "provider_connection_deleted";
+const AUDIT_ACTION_CREATE_MODEL_ROUTE: &str = "model_route_created";
+const AUDIT_ACTION_DELETE_MODEL_ROUTE: &str = "model_route_deleted";
+const AUDIT_ENTITY_PROVIDER: &str = "provider_connection";
+const AUDIT_ENTITY_MODEL_ROUTE: &str = "model_route";
 
 #[derive(Debug, Serialize)]
 pub struct ProviderConnectionResponse {
@@ -243,6 +252,7 @@ pub async fn list_provider_connections(
 
 pub async fn create_provider_connection(
     State(state): State<AppState>,
+    Extension(identity): Extension<ApiKeyIdentity>,
     Json(payload): Json<ProviderConnectionCreateRequest>,
 ) -> ProviderHttpResult<Json<ProviderConnectionCreateResponse>> {
     let name = payload.name.trim();
@@ -327,6 +337,24 @@ pub async fn create_provider_connection(
             ))
         })?;
 
+    let audit = AdminAuditInput {
+        actor_user_id: Some(identity.user_id),
+        action: AUDIT_ACTION_CREATE_PROVIDER.to_owned(),
+        entity_type: AUDIT_ENTITY_PROVIDER.to_owned(),
+        entity_id: Some(id.to_string()),
+        payload_json: serialize_payload(json!({
+            "name": name,
+            "provider_type": provider_type,
+            "base_url": base_url,
+            "enabled": enabled,
+            "api_key_stored": true,
+        })),
+    };
+    if let Err(error) = record_admin_audit(&state.database, state.database_backend(), &audit).await
+    {
+        warn!(error = %error, "failed to record provider connection creation audit");
+    }
+
     Ok(Json(ProviderConnectionCreateResponse {
         id: id.to_string(),
         name: name.to_string(),
@@ -338,6 +366,7 @@ pub async fn create_provider_connection(
 
 pub async fn delete_provider_connection(
     State(state): State<AppState>,
+    Extension(identity): Extension<ApiKeyIdentity>,
     Path(id): Path<Uuid>,
 ) -> ProviderHttpResult<Json<ProviderConnectionWithStatus>> {
     let removed = query(&prepare_sql(
@@ -356,6 +385,20 @@ pub async fn delete_provider_connection(
                 "provider connection not found".to_string(),
             ))),
         ));
+    }
+
+    let audit = AdminAuditInput {
+        actor_user_id: Some(identity.user_id),
+        action: AUDIT_ACTION_DELETE_PROVIDER.to_owned(),
+        entity_type: AUDIT_ENTITY_PROVIDER.to_owned(),
+        entity_id: Some(id.to_string()),
+        payload_json: serialize_payload(json!({
+            "deleted": true,
+        })),
+    };
+    if let Err(error) = record_admin_audit(&state.database, state.database_backend(), &audit).await
+    {
+        warn!(error = %error, "failed to record provider connection deletion audit");
     }
 
     Ok(Json(ProviderConnectionWithStatus {
@@ -442,6 +485,7 @@ pub async fn list_model_routes(
 
 pub async fn create_model_route(
     State(state): State<AppState>,
+    Extension(identity): Extension<ApiKeyIdentity>,
     Json(payload): Json<ModelRouteCreateRequest>,
 ) -> ProviderHttpResult<Json<ModelRouteCreateResponse>> {
     let public_model = payload.public_model.trim();
@@ -558,6 +602,26 @@ pub async fn create_model_route(
     .await
     .map_err(|error| from_app_error(map_duplicate_model_error(error.to_string())))?;
 
+    let audit = AdminAuditInput {
+        actor_user_id: Some(identity.user_id),
+        action: AUDIT_ACTION_CREATE_MODEL_ROUTE.to_owned(),
+        entity_type: AUDIT_ENTITY_MODEL_ROUTE.to_owned(),
+        entity_id: Some(id.to_string()),
+        payload_json: serialize_payload(json!({
+            "provider_connection_id": provider_connection_id.to_string(),
+            "public_model": public_model,
+            "upstream_model": upstream_model,
+            "max_tokens": payload.max_tokens,
+            "pricing_input_per_1m_tokens": payload.pricing_input_per_1m_tokens.unwrap_or(0),
+            "pricing_output_per_1m_tokens": payload.pricing_output_per_1m_tokens.unwrap_or(0),
+            "enabled": enabled,
+        })),
+    };
+    if let Err(error) = record_admin_audit(&state.database, state.database_backend(), &audit).await
+    {
+        warn!(error = %error, "failed to record model route creation audit");
+    }
+
     Ok(Json(ModelRouteCreateResponse {
         id: id.to_string(),
         provider_connection_id: provider_connection_id.to_string(),
@@ -569,6 +633,7 @@ pub async fn create_model_route(
 
 pub async fn delete_model_route(
     State(state): State<AppState>,
+    Extension(identity): Extension<ApiKeyIdentity>,
     Path(id): Path<Uuid>,
 ) -> ProviderHttpResult<Json<ModelRouteWithStatus>> {
     let removed = query(&prepare_sql(
@@ -587,6 +652,20 @@ pub async fn delete_model_route(
                 "model route not found".to_string(),
             ))),
         ));
+    }
+
+    let audit = AdminAuditInput {
+        actor_user_id: Some(identity.user_id),
+        action: AUDIT_ACTION_DELETE_MODEL_ROUTE.to_owned(),
+        entity_type: AUDIT_ENTITY_MODEL_ROUTE.to_owned(),
+        entity_id: Some(id.to_string()),
+        payload_json: serialize_payload(json!({
+            "deleted": true,
+        })),
+    };
+    if let Err(error) = record_admin_audit(&state.database, state.database_backend(), &audit).await
+    {
+        warn!(error = %error, "failed to record model route deletion audit");
     }
 
     Ok(Json(ModelRouteWithStatus {
