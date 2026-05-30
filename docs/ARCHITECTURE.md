@@ -130,6 +130,14 @@ MVP router behavior:
 The router should only orchestrate these steps. Provider details, metering
 logic, and wallet updates should live in their own modules.
 
+Gateway completion logging is centralized behind a small recorder boundary
+rather than repeated per endpoint. The recorder owns request-log field
+construction, latency calculation, alias fallbacks, and async persistence. This
+keeps handler branches focused on routing, billing, limits, and response
+construction while preserving the existing request log schema. A full Tower
+middleware can replace this boundary later, but the current shape keeps access
+to route/provider context that is only known after model resolution.
+
 Later router behavior:
 
 - Fallback routes.

@@ -193,22 +193,20 @@ async fn chat_completions_impl(
         .path(spec.path)
         .streaming(payload.stream)
         .build();
+    let unresolved_completion_log = GatewayCompletionLog::new(
+        &state.database,
+        state.database_backend(),
+        &context,
+        request_started_at,
+    )
+    .with_route_alias(public_model);
 
     if public_model.is_empty() {
         let app_error = AppError::invalid_config(spec.model_field, "model is required");
         let status = app_error_status_code(&app_error);
         let error_code = error_code_from_app_error(&app_error);
-        record_gateway_request_completion(
-            &state.database,
-            state.database_backend(),
-            &context,
-            &request_started_at,
-            status,
-            Some(public_model),
-            None,
-            Some(&error_code),
-        )
-        .await;
+        record_gateway_request_completion(&unresolved_completion_log, status, Some(&error_code))
+            .await;
         return Ok(build_error_response(
             &context,
             status,
@@ -223,17 +221,8 @@ async fn chat_completions_impl(
         );
         let status = app_error_status_code(&app_error);
         let error_code = error_code_from_app_error(&app_error);
-        record_gateway_request_completion(
-            &state.database,
-            state.database_backend(),
-            &context,
-            &request_started_at,
-            status,
-            Some(public_model),
-            None,
-            Some(&error_code),
-        )
-        .await;
+        record_gateway_request_completion(&unresolved_completion_log, status, Some(&error_code))
+            .await;
         return Ok(build_error_response(
             &context,
             status,
@@ -261,13 +250,8 @@ async fn chat_completions_impl(
             let status = app_error_status_code(&error);
             let error_code = error_code_from_app_error(&error);
             record_gateway_request_completion(
-                &state.database,
-                state.database_backend(),
-                &context,
-                &request_started_at,
+                &unresolved_completion_log,
                 status,
-                Some(public_model),
-                None,
                 Some(&error_code),
             )
             .await;
@@ -290,6 +274,13 @@ async fn chat_completions_impl(
         .model(route.upstream_model.clone())
         .streaming(payload.stream)
         .build();
+    let resolved_completion_log = GatewayCompletionLog::new(
+        &state.database,
+        state.database_backend(),
+        &context,
+        request_started_at,
+    )
+    .with_route_alias(public_model);
 
     info!(
         request_id = %context.request_id,
@@ -312,17 +303,8 @@ async fn chat_completions_impl(
         Err(error) => {
             let status = app_error_status_code(&error);
             let error_code = error_code_from_app_error(&error);
-            record_gateway_request_completion(
-                &state.database,
-                state.database_backend(),
-                &context,
-                &request_started_at,
-                status,
-                Some(public_model),
-                None,
-                Some(&error_code),
-            )
-            .await;
+            record_gateway_request_completion(&resolved_completion_log, status, Some(&error_code))
+                .await;
             let (_, body) = from_app_error(error);
             return Ok(build_error_response(&context, status, body));
         }
@@ -343,6 +325,9 @@ async fn chat_completions_impl(
     } else {
         "openai-compatible".to_owned()
     };
+    let completion_log = resolved_completion_log
+        .clone()
+        .with_provider_alias(provider_name.clone());
     let route_price = route.route_price();
     let provider = OpenAiCompatibleProvider::new(
         provider_name.clone(),
@@ -374,17 +359,7 @@ async fn chat_completions_impl(
         let status = app_error_status_code(&error);
         let error_code = error_code_from_app_error(&error);
         let latency_ms = request_started_at.elapsed().as_millis() as u64;
-        record_gateway_request_completion(
-            &state.database,
-            state.database_backend(),
-            &context,
-            &request_started_at,
-            status,
-            Some(public_model),
-            Some(&provider_name),
-            Some(&error_code),
-        )
-        .await;
+        record_gateway_request_completion(&completion_log, status, Some(&error_code)).await;
         let (status, body) = from_app_error(error);
         if let Err(error) = billing::record_usage(
             &state.database,
@@ -445,17 +420,7 @@ async fn chat_completions_impl(
             let status = app_error_status_code(&error);
             let error_code = error_code_from_app_error(&error);
             let latency_ms = request_started_at.elapsed().as_millis() as u64;
-            record_gateway_request_completion(
-                &state.database,
-                state.database_backend(),
-                &context,
-                &request_started_at,
-                status,
-                Some(public_model),
-                Some(&provider_name),
-                Some(&error_code),
-            )
-            .await;
+            record_gateway_request_completion(&completion_log, status, Some(&error_code)).await;
             let (_, body) = from_app_error(error);
             observe_gateway_metrics(
                 &state.metrics,
@@ -546,13 +511,8 @@ async fn chat_completions_impl(
                     route_price,
                 );
                 record_gateway_request_completion(
-                    &state.database,
-                    state.database_backend(),
-                    &context,
-                    &request_started_at,
+                    &completion_log,
                     status,
-                    Some(public_model),
-                    Some(&provider_name),
                     Some(error_code.as_str()),
                 )
                 .await;
@@ -632,13 +592,8 @@ async fn chat_completions_impl(
                     route_price,
                 );
                 record_gateway_request_completion(
-                    &state.database,
-                    state.database_backend(),
-                    &context,
-                    &request_started_at,
+                    &completion_log,
                     status,
-                    Some(public_model),
-                    Some(&provider_name),
                     Some(error_code.as_str()),
                 )
                 .await;
@@ -689,17 +644,8 @@ async fn chat_completions_impl(
                 latency_ms,
                 route_price,
             );
-            record_gateway_request_completion(
-                &state.database,
-                state.database_backend(),
-                &context,
-                &request_started_at,
-                status,
-                Some(public_model),
-                Some(&provider_name),
-                Some(error_code.as_str()),
-            )
-            .await;
+            record_gateway_request_completion(&completion_log, status, Some(error_code.as_str()))
+                .await;
             release_limit_lease(Some(limit_lease));
             return Ok(build_error_response(&context, status, body));
         }
@@ -713,17 +659,7 @@ async fn chat_completions_impl(
             latency_ms,
             route_price,
         );
-        record_gateway_request_completion(
-            &state.database,
-            state.database_backend(),
-            &context,
-            &request_started_at,
-            StatusCode::OK,
-            Some(public_model),
-            Some(&provider_name),
-            None,
-        )
-        .await;
+        record_gateway_request_completion(&completion_log, StatusCode::OK, None).await;
         let response = json_chat_completion_response(
             &completion_id,
             public_model.to_string(),
@@ -737,51 +673,103 @@ async fn chat_completions_impl(
     Ok(response)
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn record_gateway_request_completion(
-    database: &AnyPool,
+#[derive(Debug, Clone)]
+struct GatewayCompletionLog {
+    database: AnyPool,
     database_backend: DatabaseBackend,
-    context: &RequestContext,
-    request_started_at: &Instant,
+    context: RequestContext,
+    request_started_at: Instant,
+    route_alias: Option<String>,
+    provider_alias: Option<String>,
+}
+
+impl GatewayCompletionLog {
+    fn new(
+        database: &AnyPool,
+        database_backend: DatabaseBackend,
+        context: &RequestContext,
+        request_started_at: Instant,
+    ) -> Self {
+        Self {
+            database: database.clone(),
+            database_backend,
+            context: context.clone(),
+            request_started_at,
+            route_alias: None,
+            provider_alias: None,
+        }
+    }
+
+    fn with_route_alias(mut self, route_alias: impl Into<String>) -> Self {
+        self.route_alias = Some(route_alias.into());
+        self
+    }
+
+    fn with_provider_alias(mut self, provider_alias: impl Into<String>) -> Self {
+        self.provider_alias = Some(provider_alias.into());
+        self
+    }
+
+    async fn record(&self, status: StatusCode, error_code: Option<&str>) {
+        self.spawn_record(self.request_log_input(status, error_code));
+    }
+
+    fn request_log_input(&self, status: StatusCode, error_code: Option<&str>) -> RequestLogInput {
+        let route = self
+            .context
+            .route
+            .clone()
+            .or_else(|| self.route_alias.clone());
+        let provider = self
+            .context
+            .provider
+            .clone()
+            .or_else(|| self.provider_alias.clone());
+        let latency_ms = self.request_started_at.elapsed().as_millis() as u64;
+
+        RequestLogInput {
+            request_id: self.context.request_id,
+            user_id: self.context.user_id,
+            api_key_id: self.context.api_key_id,
+            provider_id: self.context.provider_id,
+            route_id: self.context.route_id,
+            method: self
+                .context
+                .method
+                .clone()
+                .unwrap_or_else(|| "POST".to_owned()),
+            path: self
+                .context
+                .path
+                .clone()
+                .unwrap_or_else(|| CHAT_COMPLETIONS_PATH.to_owned()),
+            route,
+            provider,
+            status_code: status,
+            latency_ms,
+            error_code: error_code.map(|value| value.to_string()),
+        }
+    }
+
+    fn spawn_record(&self, request_log: RequestLogInput) {
+        let database = self.database.clone();
+        let database_backend = self.database_backend;
+
+        let _request_log_task = task::spawn(async move {
+            if let Err(error) = record_request_log(&database, database_backend, &request_log).await
+            {
+                warn!(error = %error, "failed to persist gateway request log");
+            }
+        });
+    }
+}
+
+async fn record_gateway_request_completion(
+    completion_log: &GatewayCompletionLog,
     status: StatusCode,
-    route_alias: Option<&str>,
-    provider_alias: Option<&str>,
     error_code: Option<&str>,
 ) {
-    let route = context
-        .route
-        .clone()
-        .or_else(|| route_alias.map(|value| value.to_string()));
-    let provider = context
-        .provider
-        .clone()
-        .or_else(|| provider_alias.map(|value| value.to_string()));
-    let latency_ms = request_started_at.elapsed().as_millis() as u64;
-
-    let database = database.clone();
-    let request_log = RequestLogInput {
-        request_id: context.request_id,
-        user_id: context.user_id,
-        api_key_id: context.api_key_id,
-        provider_id: context.provider_id,
-        route_id: context.route_id,
-        method: context.method.clone().unwrap_or_else(|| "POST".to_owned()),
-        path: context
-            .path
-            .clone()
-            .unwrap_or_else(|| "/v1/chat/completions".to_owned()),
-        route,
-        provider,
-        status_code: status,
-        latency_ms,
-        error_code: error_code.map(|value| value.to_string()),
-    };
-
-    let _request_log_task = task::spawn(async move {
-        if let Err(error) = record_request_log(&database, database_backend, &request_log).await {
-            warn!(error = %error, "failed to persist gateway request log");
-        }
-    });
+    completion_log.record(status, error_code).await;
 }
 
 async fn acquire_runtime_limits(
@@ -1018,6 +1006,13 @@ fn build_stream_events(
     let completion_id = completion_id.to_string();
     let context = context.clone();
     let route_alias = model.clone();
+    let completion_log = GatewayCompletionLog::new(
+        &billing_context.database,
+        billing_context.database_backend,
+        &context,
+        billing_context.request_started_at,
+    )
+    .with_route_alias(route_alias.clone());
 
     struct StreamBuildState {
         upstream: ChatCompletionStream,
@@ -1039,6 +1034,7 @@ fn build_stream_events(
         emit_done: bool,
         limit_lease: Option<RuntimeLimitLease>,
         metrics: MetricsRegistry,
+        completion_log: GatewayCompletionLog,
     }
 
     impl Drop for StreamBuildState {
@@ -1068,6 +1064,7 @@ fn build_stream_events(
             emit_done: true,
             limit_lease: billing_context.limit_lease,
             metrics: billing_context.metrics,
+            completion_log,
         },
         |mut state| async move {
             if !state.emit_done {
@@ -1137,14 +1134,9 @@ fn build_stream_events(
                                     error = %error,
                                     "failed to persist stream request usage after stream chunk error"
                                 );
-                                let _ = record_gateway_request_completion(
-                                    &state.database,
-                                    state.database_backend,
-                                    &state.context,
-                                    &state.request_started_at,
+                                record_gateway_request_completion(
+                                    &state.completion_log,
                                     usage_status,
-                                    Some(&state.route_alias),
-                                    state.context.provider.as_deref(),
                                     Some(usage_error_code.as_str()),
                                 )
                                 .await;
@@ -1175,14 +1167,9 @@ fn build_stream_events(
                                 latency_ms,
                                 state.route_price,
                             );
-                            let _ = record_gateway_request_completion(
-                                &state.database,
-                                state.database_backend,
-                                &state.context,
-                                &state.request_started_at,
+                            record_gateway_request_completion(
+                                &state.completion_log,
                                 status,
-                                Some(&state.route_alias),
-                                state.context.provider.as_deref(),
                                 Some(error_code.as_str()),
                             )
                             .await;
@@ -1232,14 +1219,9 @@ fn build_stream_events(
                                 error = %error,
                                 "failed to persist stream request usage"
                             );
-                            let _ = record_gateway_request_completion(
-                                &state.database,
-                                state.database_backend,
-                                &state.context,
-                                &state.request_started_at,
+                            record_gateway_request_completion(
+                                &state.completion_log,
                                 app_error_status_code(&error),
-                                Some(&state.route_alias),
-                                state.context.provider.as_deref(),
                                 Some(error_code_from_app_error(&error).as_str()),
                             )
                             .await;
@@ -1270,14 +1252,9 @@ fn build_stream_events(
                             latency_ms,
                             state.route_price,
                         );
-                        let _ = record_gateway_request_completion(
-                            &state.database,
-                            state.database_backend,
-                            &state.context,
-                            &state.request_started_at,
+                        record_gateway_request_completion(
+                            &state.completion_log,
                             StatusCode::OK,
-                            Some(&state.route_alias),
-                            state.context.provider.as_deref(),
                             None,
                         )
                         .await;
@@ -1528,6 +1505,40 @@ mod tests {
         assert_eq!(usage.prompt_tokens, 3);
         assert_eq!(usage.completion_tokens, 100);
         assert_eq!(usage.total_tokens, 103);
+    }
+
+    #[tokio::test]
+    async fn gateway_completion_log_builds_request_log_from_context_and_aliases() {
+        let database = sqlite_test_database().await;
+        let request_id = Uuid::now_v7();
+        let user_id = Uuid::now_v7();
+        let api_key_id = Uuid::now_v7();
+        let context = RequestContextBuilder::default()
+            .request_id(request_id)
+            .trace_id(request_id)
+            .user_id(user_id)
+            .api_key_id(api_key_id)
+            .method("POST")
+            .path(RESPONSES_PATH)
+            .build();
+
+        let completion_log =
+            GatewayCompletionLog::new(&database, DatabaseBackend::Sqlite, &context, Instant::now())
+                .with_route_alias("mizan/test-model")
+                .with_provider_alias("openai-compatible");
+
+        let input =
+            completion_log.request_log_input(StatusCode::BAD_GATEWAY, Some("provider_error"));
+
+        assert_eq!(input.request_id, request_id);
+        assert_eq!(input.user_id, Some(user_id));
+        assert_eq!(input.api_key_id, Some(api_key_id));
+        assert_eq!(input.method, "POST");
+        assert_eq!(input.path, RESPONSES_PATH);
+        assert_eq!(input.route.as_deref(), Some("mizan/test-model"));
+        assert_eq!(input.provider.as_deref(), Some("openai-compatible"));
+        assert_eq!(input.status_code, StatusCode::BAD_GATEWAY);
+        assert_eq!(input.error_code.as_deref(), Some("provider_error"));
     }
 
     #[tokio::test]
