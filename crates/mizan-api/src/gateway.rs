@@ -48,6 +48,34 @@ const RESPONSES_MODEL_FIELD: &str = "responses.model";
 const RESPONSES_STREAM_FIELD: &str = "responses.stream";
 const RESPONSES_MAX_TOKENS_FIELD: &str = "responses.max_tokens";
 
+#[derive(Clone, Copy, Debug)]
+struct GatewayRequestSpec {
+    path: &'static str,
+    kind: &'static str,
+    model_field: &'static str,
+    stream_field: &'static str,
+    max_tokens_field: &'static str,
+    allow_stream: bool,
+}
+
+const CHAT_COMPLETIONS_SPEC: GatewayRequestSpec = GatewayRequestSpec {
+    path: CHAT_COMPLETIONS_PATH,
+    kind: "chat_completion",
+    model_field: CHAT_COMPLETIONS_MODEL_FIELD,
+    stream_field: CHAT_COMPLETIONS_STREAM_FIELD,
+    max_tokens_field: CHAT_COMPLETIONS_MAX_TOKENS_FIELD,
+    allow_stream: true,
+};
+
+const RESPONSES_SPEC: GatewayRequestSpec = GatewayRequestSpec {
+    path: RESPONSES_PATH,
+    kind: "responses",
+    model_field: RESPONSES_MODEL_FIELD,
+    stream_field: RESPONSES_STREAM_FIELD,
+    max_tokens_field: RESPONSES_MAX_TOKENS_FIELD,
+    allow_stream: false,
+};
+
 #[derive(Debug, Deserialize)]
 pub struct ChatCompletionsRequest {
     pub model: String,
@@ -132,19 +160,7 @@ pub async fn chat_completions(
     headers: HeaderMap,
     Json(payload): Json<ChatCompletionsRequest>,
 ) -> GatewayHttpResult {
-    chat_completions_impl(
-        state,
-        identity,
-        headers,
-        payload,
-        CHAT_COMPLETIONS_PATH,
-        "chat_completion",
-        CHAT_COMPLETIONS_MODEL_FIELD,
-        CHAT_COMPLETIONS_STREAM_FIELD,
-        CHAT_COMPLETIONS_MAX_TOKENS_FIELD,
-        true,
-    )
-    .await
+    chat_completions_impl(state, identity, headers, payload, CHAT_COMPLETIONS_SPEC).await
 }
 
 pub async fn responses(
@@ -153,19 +169,7 @@ pub async fn responses(
     headers: HeaderMap,
     Json(payload): Json<ChatCompletionsRequest>,
 ) -> GatewayHttpResult {
-    chat_completions_impl(
-        state,
-        identity,
-        headers,
-        payload,
-        RESPONSES_PATH,
-        "responses",
-        RESPONSES_MODEL_FIELD,
-        RESPONSES_STREAM_FIELD,
-        RESPONSES_MAX_TOKENS_FIELD,
-        false,
-    )
-    .await
+    chat_completions_impl(state, identity, headers, payload, RESPONSES_SPEC).await
 }
 
 async fn chat_completions_impl(
@@ -173,12 +177,7 @@ async fn chat_completions_impl(
     identity: ApiKeyIdentity,
     headers: HeaderMap,
     payload: ChatCompletionsRequest,
-    request_path: &'static str,
-    request_kind: &'static str,
-    request_model_field: &'static str,
-    request_stream_field: &'static str,
-    request_max_tokens_field: &'static str,
-    allow_stream: bool,
+    spec: GatewayRequestSpec,
 ) -> GatewayHttpResult {
     let request_id = parse_request_id_header(&headers, "x-request-id").unwrap_or_else(Uuid::now_v7);
     let trace_id = parse_request_id_header(&headers, "x-trace-id").unwrap_or(request_id);
@@ -191,12 +190,12 @@ async fn chat_completions_impl(
         .request_id(request_id)
         .trace_id(trace_id)
         .method("POST")
-        .path(request_path)
+        .path(spec.path)
         .streaming(payload.stream)
         .build();
 
     if public_model.is_empty() {
-        let app_error = AppError::invalid_config(&request_model_field, "model is required");
+        let app_error = AppError::invalid_config(spec.model_field, "model is required");
         let status = app_error_status_code(&app_error);
         let error_code = error_code_from_app_error(&app_error);
         record_gateway_request_completion(
@@ -217,9 +216,9 @@ async fn chat_completions_impl(
         ));
     }
 
-    if !allow_stream && payload.stream {
+    if !spec.allow_stream && payload.stream {
         let app_error = AppError::invalid_config(
-            &request_stream_field,
+            spec.stream_field,
             "stream is not supported for this endpoint yet",
         );
         let status = app_error_status_code(&app_error);
@@ -246,7 +245,7 @@ async fn chat_completions_impl(
         &state.database,
         state.database_backend(),
         state.config.provider_secret_key.as_deref(),
-        &request_model_field,
+        spec.model_field,
         public_model,
     )
     .instrument(info_span!(
@@ -286,7 +285,7 @@ async fn chat_completions_impl(
         .route(public_model.to_string())
         .route_id(route.id)
         .method("POST")
-        .path(request_path)
+        .path(spec.path)
         .provider_id(route.provider_connection_id)
         .model(route.upstream_model.clone())
         .streaming(payload.stream)
@@ -299,15 +298,15 @@ async fn chat_completions_impl(
         api_key_id = %context.api_key_id.map_or("unknown".to_owned(), |value| value.to_string()),
         route = %context.route.clone().unwrap_or_default(),
         streaming = context.streaming,
-        request_kind = request_kind,
-        request_path = request_path,
+        request_kind = spec.kind,
+        request_path = spec.path,
         "gateway request",
     );
 
     let effective_max_tokens = match resolve_effective_max_tokens(
         payload.max_tokens,
         route.max_tokens,
-        &request_max_tokens_field,
+        spec.max_tokens_field,
     ) {
         Ok(max_tokens) => max_tokens,
         Err(error) => {
