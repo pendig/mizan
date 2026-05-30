@@ -85,7 +85,7 @@ curl -fsS -X POST "${BASE_URL}/admin/users/${admin_user_id}/credits/grant" \
   -H 'content-type: application/json' \
   -d '{"amount_microcredits":1000000,"reason":"alpha_smoke"}' >/dev/null
 
-echo "Checking models, non-stream chat, stream chat, usage, credits, and metrics"
+echo "Checking models, non-stream chat, non-stream responses, stream chat, usage, credits, and metrics"
 curl -fsS "${BASE_URL}/v1/models" -H "authorization: Bearer ${api_key}" >/dev/null
 echo "Syncing upstream model list"
 synced_models="$(
@@ -95,6 +95,10 @@ synced_models="$(
 )"
 printf '%s\n' "${synced_models}" | grep -q '^mock-gpt$'
 curl -fsS -X POST "${BASE_URL}/v1/chat/completions" \
+  -H "authorization: Bearer ${api_key}" \
+  -H 'content-type: application/json' \
+  -d '{"model":"alpha-mock","messages":[{"role":"user","content":"hello"}],"max_tokens":32}' >/dev/null
+curl -fsS -X POST "${BASE_URL}/v1/responses" \
   -H "authorization: Bearer ${api_key}" \
   -H 'content-type: application/json' \
   -d '{"model":"alpha-mock","messages":[{"role":"user","content":"hello"}],"max_tokens":32}' >/dev/null

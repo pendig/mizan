@@ -12,9 +12,7 @@ Use API endpoints plus scripts:
   `POST /admin/users/{id}/credits/grant`
 - User setup: `POST /auth/register`, `POST /auth/login`, `POST /api-keys`
 - Runtime checks: `GET /v1/models`, `POST /v1/chat/completions`,
-  `GET /v1/usage`, `GET /v1/credits`, `GET /metrics`
-- Future extension (next milestone): `POST /v1/responses` with the same
-  OpenAI-compatible shape.
+  `POST /v1/responses`, `GET /v1/usage`, `GET /v1/credits`, `GET /metrics`
 - Model sync helper: `MODEL_SYNC_BASE_URL=... MODEL_SYNC_API_KEY=... scripts/model-sync.sh`
   for syncing OpenAI-compatible model ids from an upstream provider. The
   helper uses `python3` for JSON parsing, so `jq` is not required.
@@ -72,7 +70,7 @@ The smoke covers:
 - model sync helper against the mock upstream
 - non-streaming chat
 - streaming chat
-- /v1/responses (when available; tracked in roadmap issue)
+- /v1/responses
 - usage and credit reads
 - Prometheus metrics scrape
 

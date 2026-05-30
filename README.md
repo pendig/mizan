@@ -33,8 +33,8 @@ audit log foundations.
 
 ## MVP Scope
 
-- OpenAI-compatible gateway for `/v1/chat/completions` and `/v1/models`
-  (and `/v1/responses` in the next phase)
+- OpenAI-compatible gateway for `/v1/chat/completions`, `/v1/responses`, and
+  `/v1/models`
 - Admin-managed upstream connections for API providers and local models
 - User registration, virtual API keys, model access rules, and usage history
 - Credit accounting based on input/output token prices per 1M tokens

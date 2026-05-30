@@ -16,7 +16,8 @@ Included:
 - Provider connections and model routes.
 - `GET /v1/models`.
 - OpenAI-compatible `POST /v1/chat/completions`.
-- Non-streaming and streaming responses.
+- OpenAI-compatible `POST /v1/responses` for non-stream canonical replies.
+- Non-streaming and streaming chat responses.
 - Usage events, credit ledger, wallet balance, and credit grants.
 - Redis RPM counters and concurrency leases.
 - Prometheus gateway metrics.
@@ -28,7 +29,6 @@ Not included yet:
 - RTK-backed CLI proxy baseline.
 - Durable request log and admin audit log foundations.
 - Production deployment hardening beyond local smoke validation.
-- OpenAI-compatible `/v1/responses` endpoint.
 - Non-API provider adapters (for Codex/Gemini CLI/Claude-style auth/login flows)
   before the broader MVP cut.
 

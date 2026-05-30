@@ -62,12 +62,10 @@ Progress status (current): Milestone 4 completed with non-streaming chat proxy f
 
 1. Add non-streaming `/v1/chat/completions`.
 2. Add streaming `/v1/chat/completions`.
-3. Add `POST /v1/responses` and shared response normalization path
-   (tracked in Issue #52).
-4. Normalize upstream errors.
-5. Add request IDs.
-6. Add provider health state.
-7. Keep gateway orchestration separate from metering and ledger code.
+3. Normalize upstream errors.
+4. Add request IDs.
+5. Add provider health state.
+6. Keep gateway orchestration separate from metering and ledger code.
 
 ## Credits And Metering
 

@@ -39,6 +39,15 @@ use crate::utils::{decrypt_provider_api_key, from_app_error, now_utc_epoch_secon
 
 type GatewayHttpResult = Result<Response, (StatusCode, Json<ErrorEnvelope>)>;
 
+const CHAT_COMPLETIONS_PATH: &str = "/v1/chat/completions";
+const RESPONSES_PATH: &str = "/v1/responses";
+const CHAT_COMPLETIONS_MODEL_FIELD: &str = "chat_completion.model";
+const CHAT_COMPLETIONS_STREAM_FIELD: &str = "chat_completion.stream";
+const CHAT_COMPLETIONS_MAX_TOKENS_FIELD: &str = "chat_completion.max_tokens";
+const RESPONSES_MODEL_FIELD: &str = "responses.model";
+const RESPONSES_STREAM_FIELD: &str = "responses.stream";
+const RESPONSES_MAX_TOKENS_FIELD: &str = "responses.max_tokens";
+
 #[derive(Debug, Deserialize)]
 pub struct ChatCompletionsRequest {
     pub model: String,
@@ -123,6 +132,54 @@ pub async fn chat_completions(
     headers: HeaderMap,
     Json(payload): Json<ChatCompletionsRequest>,
 ) -> GatewayHttpResult {
+    chat_completions_impl(
+        state,
+        identity,
+        headers,
+        payload,
+        CHAT_COMPLETIONS_PATH,
+        "chat_completion",
+        CHAT_COMPLETIONS_MODEL_FIELD,
+        CHAT_COMPLETIONS_STREAM_FIELD,
+        CHAT_COMPLETIONS_MAX_TOKENS_FIELD,
+        true,
+    )
+    .await
+}
+
+pub async fn responses(
+    State(state): State<AppState>,
+    Extension(identity): Extension<ApiKeyIdentity>,
+    headers: HeaderMap,
+    Json(payload): Json<ChatCompletionsRequest>,
+) -> GatewayHttpResult {
+    chat_completions_impl(
+        state,
+        identity,
+        headers,
+        payload,
+        RESPONSES_PATH,
+        "responses",
+        RESPONSES_MODEL_FIELD,
+        RESPONSES_STREAM_FIELD,
+        RESPONSES_MAX_TOKENS_FIELD,
+        false,
+    )
+    .await
+}
+
+async fn chat_completions_impl(
+    state: AppState,
+    identity: ApiKeyIdentity,
+    headers: HeaderMap,
+    payload: ChatCompletionsRequest,
+    request_path: &'static str,
+    request_kind: &'static str,
+    request_model_field: &'static str,
+    request_stream_field: &'static str,
+    request_max_tokens_field: &'static str,
+    allow_stream: bool,
+) -> GatewayHttpResult {
     let request_id = parse_request_id_header(&headers, "x-request-id").unwrap_or_else(Uuid::now_v7);
     let trace_id = parse_request_id_header(&headers, "x-trace-id").unwrap_or(request_id);
     let request_started_at = Instant::now();
@@ -134,12 +191,37 @@ pub async fn chat_completions(
         .request_id(request_id)
         .trace_id(trace_id)
         .method("POST")
-        .path("/v1/chat/completions")
+        .path(request_path)
         .streaming(payload.stream)
         .build();
 
     if public_model.is_empty() {
-        let app_error = AppError::invalid_config("chat_completion.model", "model is required");
+        let app_error = AppError::invalid_config(&request_model_field, "model is required");
+        let status = app_error_status_code(&app_error);
+        let error_code = error_code_from_app_error(&app_error);
+        record_gateway_request_completion(
+            &state.database,
+            state.database_backend(),
+            &context,
+            &request_started_at,
+            status,
+            Some(public_model),
+            None,
+            Some(&error_code),
+        )
+        .await;
+        return Ok(build_error_response(
+            &context,
+            status,
+            Json(ErrorEnvelope::from(&app_error)),
+        ));
+    }
+
+    if !allow_stream && payload.stream {
+        let app_error = AppError::invalid_config(
+            &request_stream_field,
+            "stream is not supported for this endpoint yet",
+        );
         let status = app_error_status_code(&app_error);
         let error_code = error_code_from_app_error(&app_error);
         record_gateway_request_completion(
@@ -164,6 +246,7 @@ pub async fn chat_completions(
         &state.database,
         state.database_backend(),
         state.config.provider_secret_key.as_deref(),
+        &request_model_field,
         public_model,
     )
     .instrument(info_span!(
@@ -203,7 +286,7 @@ pub async fn chat_completions(
         .route(public_model.to_string())
         .route_id(route.id)
         .method("POST")
-        .path("/v1/chat/completions")
+        .path(request_path)
         .provider_id(route.provider_connection_id)
         .model(route.upstream_model.clone())
         .streaming(payload.stream)
@@ -216,11 +299,17 @@ pub async fn chat_completions(
         api_key_id = %context.api_key_id.map_or("unknown".to_owned(), |value| value.to_string()),
         route = %context.route.clone().unwrap_or_default(),
         streaming = context.streaming,
-        "chat completion request",
+        request_kind = request_kind,
+        request_path = request_path,
+        "gateway request",
     );
 
     let effective_max_tokens =
-        match resolve_effective_max_tokens(payload.max_tokens, route.max_tokens) {
+        match resolve_effective_max_tokens(
+            payload.max_tokens,
+            route.max_tokens,
+            &request_max_tokens_field,
+        ) {
             Ok(max_tokens) => max_tokens,
             Err(error) => {
                 let status = app_error_status_code(&error);
@@ -279,6 +368,11 @@ pub async fn chat_completions(
     ))
     .await
     {
+        warn!(
+            request_id = %request_id,
+            error = %error,
+            "credit preflight failed"
+        );
         let status = app_error_status_code(&error);
         let error_code = error_code_from_app_error(&error);
         let latency_ms = request_started_at.elapsed().as_millis() as u64;
@@ -790,11 +884,12 @@ fn parse_request_id_header(headers: &HeaderMap, header_name: &str) -> Option<Uui
 fn resolve_effective_max_tokens(
     requested_max_tokens: Option<u64>,
     route_max_tokens: Option<u64>,
+    field_name: &'static str,
 ) -> Result<Option<u64>, AppError> {
     match (requested_max_tokens, route_max_tokens) {
         (Some(requested), Some(route_limit)) if requested > route_limit => {
             Err(AppError::invalid_config(
-                "chat_completion.max_tokens",
+                field_name,
                 "max_tokens exceeds route limit",
             ))
         }
@@ -1266,6 +1361,7 @@ async fn resolve_model_route(
     database: &AnyPool,
     database_backend: DatabaseBackend,
     provider_secret_key: Option<&str>,
+    request_model_field: &'static str,
     public_model: &str,
 ) -> Result<ResolvedModelRoute, AppError> {
     #[derive(Debug, FromRow)]
@@ -1306,9 +1402,7 @@ async fn resolve_model_route(
     .fetch_optional(database)
     .await
     .map_err(|error| AppError::infrastructure(error.to_string()))?
-    .ok_or_else(|| {
-        AppError::invalid_config("chat_completion.model", "model not found or disabled")
-    })?;
+    .ok_or_else(|| AppError::invalid_config(request_model_field, "model not found or disabled"))?;
 
     let route_id = resolved.id;
     let upstream_model = resolved.upstream_model;
@@ -1406,16 +1500,21 @@ mod tests {
     #[test]
     fn resolve_effective_max_tokens_uses_route_default_and_rejects_overrides() {
         assert_eq!(
-            resolve_effective_max_tokens(None, Some(128)).unwrap(),
+            resolve_effective_max_tokens(None, Some(128), CHAT_COMPLETIONS_MAX_TOKENS_FIELD).unwrap(),
             Some(128)
         );
         assert_eq!(
-            resolve_effective_max_tokens(Some(64), Some(128)).unwrap(),
+            resolve_effective_max_tokens(Some(64), Some(128), CHAT_COMPLETIONS_MAX_TOKENS_FIELD).unwrap(),
             Some(64)
         );
-        assert!(resolve_effective_max_tokens(Some(129), Some(128)).is_err());
+        assert!(resolve_effective_max_tokens(
+            Some(129),
+            Some(128),
+            CHAT_COMPLETIONS_MAX_TOKENS_FIELD
+        )
+        .is_err());
         assert_eq!(
-            resolve_effective_max_tokens(Some(64), None).unwrap(),
+            resolve_effective_max_tokens(Some(64), None, CHAT_COMPLETIONS_MAX_TOKENS_FIELD).unwrap(),
             Some(64)
         );
     }
