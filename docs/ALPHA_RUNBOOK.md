@@ -15,6 +15,8 @@ Use API endpoints plus scripts:
   `GET /v1/usage`, `GET /v1/credits`, `GET /metrics`
 - Future extension (next milestone): `POST /v1/responses` with the same
   OpenAI-compatible shape.
+- Model sync helper: `MODEL_SYNC_BASE_URL=... MODEL_SYNC_API_KEY=... scripts/model-sync.sh`
+  for syncing OpenAI-compatible model ids from an upstream provider.
 
 Tradeoff: this is less friendly than a web UI, but it keeps alpha scope small
 and makes correctness easy to validate in CI-like scripts.
