@@ -304,31 +304,30 @@ async fn chat_completions_impl(
         "gateway request",
     );
 
-    let effective_max_tokens =
-        match resolve_effective_max_tokens(
-            payload.max_tokens,
-            route.max_tokens,
-            &request_max_tokens_field,
-        ) {
-            Ok(max_tokens) => max_tokens,
-            Err(error) => {
-                let status = app_error_status_code(&error);
-                let error_code = error_code_from_app_error(&error);
-                record_gateway_request_completion(
-                    &state.database,
-                    state.database_backend(),
-                    &context,
-                    &request_started_at,
-                    status,
-                    Some(public_model),
-                    None,
-                    Some(&error_code),
-                )
-                .await;
-                let (_, body) = from_app_error(error);
-                return Ok(build_error_response(&context, status, body));
-            }
-        };
+    let effective_max_tokens = match resolve_effective_max_tokens(
+        payload.max_tokens,
+        route.max_tokens,
+        &request_max_tokens_field,
+    ) {
+        Ok(max_tokens) => max_tokens,
+        Err(error) => {
+            let status = app_error_status_code(&error);
+            let error_code = error_code_from_app_error(&error);
+            record_gateway_request_completion(
+                &state.database,
+                state.database_backend(),
+                &context,
+                &request_started_at,
+                status,
+                Some(public_model),
+                None,
+                Some(&error_code),
+            )
+            .await;
+            let (_, body) = from_app_error(error);
+            return Ok(build_error_response(&context, status, body));
+        }
+    };
 
     let upstream_request = ChatRequest {
         model: route.upstream_model.clone(),
@@ -887,12 +886,9 @@ fn resolve_effective_max_tokens(
     field_name: &'static str,
 ) -> Result<Option<u64>, AppError> {
     match (requested_max_tokens, route_max_tokens) {
-        (Some(requested), Some(route_limit)) if requested > route_limit => {
-            Err(AppError::invalid_config(
-                field_name,
-                "max_tokens exceeds route limit",
-            ))
-        }
+        (Some(requested), Some(route_limit)) if requested > route_limit => Err(
+            AppError::invalid_config(field_name, "max_tokens exceeds route limit"),
+        ),
         (Some(requested), _) => Ok(Some(requested)),
         (None, route_limit) => Ok(route_limit),
     }
@@ -1500,21 +1496,22 @@ mod tests {
     #[test]
     fn resolve_effective_max_tokens_uses_route_default_and_rejects_overrides() {
         assert_eq!(
-            resolve_effective_max_tokens(None, Some(128), CHAT_COMPLETIONS_MAX_TOKENS_FIELD).unwrap(),
+            resolve_effective_max_tokens(None, Some(128), CHAT_COMPLETIONS_MAX_TOKENS_FIELD)
+                .unwrap(),
             Some(128)
         );
         assert_eq!(
-            resolve_effective_max_tokens(Some(64), Some(128), CHAT_COMPLETIONS_MAX_TOKENS_FIELD).unwrap(),
+            resolve_effective_max_tokens(Some(64), Some(128), CHAT_COMPLETIONS_MAX_TOKENS_FIELD)
+                .unwrap(),
             Some(64)
         );
-        assert!(resolve_effective_max_tokens(
-            Some(129),
-            Some(128),
-            CHAT_COMPLETIONS_MAX_TOKENS_FIELD
-        )
-        .is_err());
+        assert!(
+            resolve_effective_max_tokens(Some(129), Some(128), CHAT_COMPLETIONS_MAX_TOKENS_FIELD)
+                .is_err()
+        );
         assert_eq!(
-            resolve_effective_max_tokens(Some(64), None, CHAT_COMPLETIONS_MAX_TOKENS_FIELD).unwrap(),
+            resolve_effective_max_tokens(Some(64), None, CHAT_COMPLETIONS_MAX_TOKENS_FIELD)
+                .unwrap(),
             Some(64)
         );
     }
