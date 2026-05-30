@@ -3,6 +3,7 @@ set -euo pipefail
 
 API_PORT="${MIZAN_ALPHA_API_PORT:-18180}"
 MOCK_PORT="${MIZAN_ALPHA_MOCK_PORT:-18182}"
+WAIT_SECONDS="${MIZAN_ALPHA_WAIT_SECONDS:-600}"
 BASE_URL="${MIZAN_BASE_URL:-http://127.0.0.1:${API_PORT}}"
 MOCK_URL="${MIZAN_MOCK_BASE_URL:-http://127.0.0.1:${MOCK_PORT}}"
 ADMIN_EMAIL="${MIZAN_ADMIN_EMAIL:-admin@mizan.local}"
@@ -22,7 +23,7 @@ json_field() {
 
 wait_for() {
   local url="$1"
-  for _ in $(seq 1 60); do
+  for _ in $(seq 1 "${WAIT_SECONDS}"); do
     if curl -fsS "$url" >/dev/null 2>&1; then return 0; fi
     sleep 1
   done
@@ -84,9 +85,20 @@ curl -fsS -X POST "${BASE_URL}/admin/users/${admin_user_id}/credits/grant" \
   -H 'content-type: application/json' \
   -d '{"amount_microcredits":1000000,"reason":"alpha_smoke"}' >/dev/null
 
-echo "Checking models, non-stream chat, stream chat, usage, credits, and metrics"
+echo "Checking models, non-stream chat, non-stream responses, stream chat, usage, credits, and metrics"
 curl -fsS "${BASE_URL}/v1/models" -H "authorization: Bearer ${api_key}" >/dev/null
+echo "Syncing upstream model list"
+synced_models="$(
+  MODEL_SYNC_BASE_URL="${MOCK_URL}/v1" \
+  MODEL_SYNC_API_KEY="alpha-smoke" \
+  bash scripts/model-sync.sh --format ids
+)"
+printf '%s\n' "${synced_models}" | grep -q '^mock-gpt$'
 curl -fsS -X POST "${BASE_URL}/v1/chat/completions" \
+  -H "authorization: Bearer ${api_key}" \
+  -H 'content-type: application/json' \
+  -d '{"model":"alpha-mock","messages":[{"role":"user","content":"hello"}],"max_tokens":32}' >/dev/null
+curl -fsS -X POST "${BASE_URL}/v1/responses" \
   -H "authorization: Bearer ${api_key}" \
   -H 'content-type: application/json' \
   -d '{"model":"alpha-mock","messages":[{"role":"user","content":"hello"}],"max_tokens":32}' >/dev/null

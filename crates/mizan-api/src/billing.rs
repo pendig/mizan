@@ -8,12 +8,18 @@ use mizan_metering::UsageChargeInput;
 use mizan_providers::{ChatMessage, TokenUsage};
 use mizan_wallet::{RoutePrice, calculate_usage_charge};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use sqlx::{Any, AnyPool, FromRow, Transaction, query, query_as};
+use tracing::warn;
 use uuid::Uuid;
 
 use crate::AppState;
 use crate::auth::ApiKeyIdentity;
+use crate::logging::{AdminAuditInput, record_admin_audit, serialize_payload};
 use crate::utils::{from_app_error, prepare_sql, unix_timestamp_string};
+
+const AUDIT_ACTION_CREDIT_GRANT: &str = "credit_granted";
+const AUDIT_ENTITY_USER: &str = "user";
 
 const DEFAULT_USAGE_LIST_LIMIT: i64 = 100;
 const MAX_USAGE_LIST_LIMIT: i64 = 500;
@@ -163,6 +169,7 @@ pub async fn list_usage_admin(
 pub async fn grant_credits(
     State(state): State<AppState>,
     Path(user_id): Path<Uuid>,
+    Extension(identity): Extension<ApiKeyIdentity>,
     Json(payload): Json<GrantRequest>,
 ) -> BillingHttpResult<Json<GrantResponse>> {
     if payload.amount_microcredits <= 0 {
@@ -239,6 +246,21 @@ pub async fn grant_credits(
             "failed to commit credit grant transaction: {error}"
         )))
     })?;
+
+    let audit = AdminAuditInput {
+        actor_user_id: Some(identity.user_id),
+        action: AUDIT_ACTION_CREDIT_GRANT.to_owned(),
+        entity_type: AUDIT_ENTITY_USER.to_owned(),
+        entity_id: Some(user_id.to_string()),
+        payload_json: serialize_payload(json!({
+            "amount_microcredits": payload.amount_microcredits,
+            "reason": reason,
+        })),
+    };
+    if let Err(error) = record_admin_audit(&state.database, state.database_backend(), &audit).await
+    {
+        warn!(error = %error, "failed to record credit grant audit");
+    }
 
     Ok(Json(GrantResponse {
         user_id,

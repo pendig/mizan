@@ -29,6 +29,8 @@ clear usage and credit visibility.
 
 - Give admins one backend to register upstream AI connections.
 - Give users virtual API keys instead of raw provider credentials.
+- Normalize all outbound provider output to a single OpenAI-compatible gateway
+  contract for chat and responses (including model routing, errors, and usage metadata).
 - Track usage by user, API key, provider, route, and model.
 - Enforce basic limits: concurrency, requests per minute, tokens per minute,
   and credit balance.
@@ -56,6 +58,15 @@ for bypassing provider rules.
 For MVP, prioritize API-key providers and local OpenAI-compatible models first.
 Treat subscription/CLI connectors as experimental adapters with clear warnings,
 admin-only credential storage, and per-provider policy flags.
+
+Regardless of upstream transport:
+
+- Internal adapters must normalize to an OpenAI-compatible surface before results
+  are returned to clients.
+- Both `/v1/chat/completions` and `/v1/responses` should share the same public
+  shape and usage/credit semantics.
+- Authentication modes can differ (API key, CLI session, browser session), but the
+  exposed response contract should stay consistent.
 
 ## Personas
 
@@ -100,8 +111,11 @@ User needs:
   or model route.
 - As a user, I can register and create a virtual API key.
 - As a user, I can call `/v1/chat/completions` using that key.
+- As a user, I can call `/v1/responses` using that key.
 - As a user, I can stream responses.
 - As a user, I can view token usage, credits spent, and remaining credits.
+- As the system, any provider path (API-key, CLI session, browser session) emits
+  OpenAI-compatible responses and normalized errors.
 - As the system, every completed request creates an immutable usage event and
   credit ledger entry.
 
@@ -125,8 +139,25 @@ MVP provider types:
 Later provider types:
 
 - `native_provider`: provider-specific request/response transforms.
-- `subscription_cli`: adapter for subscription-backed CLI/web accounts.
+- `subscription_cli`: adapter for subscription-backed CLI/web accounts (including
+  Codex, Gemini CLI, or Claude-like flows).
 - `browser_session`: controlled session/cookie adapter, only if legally safe.
+
+### Canonical Provider Contract
+
+For every provider family, request handling must normalize upstream output into a
+single public shape before calling the route handler:
+
+- `POST /v1/chat/completions` and `POST /v1/responses` use the same normalized
+  OpenAI-compatible envelope.
+- Error responses keep the same public schema and contract fields (`error`, `type`,
+  `code`, request metadata).
+- Usage/credit accounting uses the same token semantics across provider families.
+- Unsupported or provider-specific payload fields are omitted from public responses.
+- Streaming SSE for chat remains OpenAI-compatible (`chat.completion.chunk`).
+
+Non-API adapters are intentionally phased and should not change the contract
+surface above.
 
 ### Model Routes
 
@@ -148,6 +179,7 @@ MVP endpoints:
 - `GET /healthz`
 - `GET /v1/models`
 - `POST /v1/chat/completions`
+- `POST /v1/responses` (next phase: OpenAI-compatible canonical response surface)
 
 Admin/user API:
 

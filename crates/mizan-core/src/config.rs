@@ -20,6 +20,7 @@ pub struct AppConfig {
     pub admin_seed_password: Option<String>,
     pub admin_seed_role: String,
     pub provider_secret_key: Option<String>,
+    pub log_raw_request_bodies: bool,
 }
 
 impl AppConfig {
@@ -118,6 +119,11 @@ impl AppConfig {
                 admin_seed_password,
                 admin_seed_role,
                 provider_secret_key,
+                log_raw_request_bodies: parse_bool_env(
+                    "MIZAN_LOG_RAW_REQUEST_BODIES",
+                    "false",
+                    |value| parse_bool_value("MIZAN_LOG_RAW_REQUEST_BODIES", value),
+                )?,
             })
         } else {
             Err(AppError::invalid_config(

@@ -12,7 +12,10 @@ Use API endpoints plus scripts:
   `POST /admin/users/{id}/credits/grant`
 - User setup: `POST /auth/register`, `POST /auth/login`, `POST /api-keys`
 - Runtime checks: `GET /v1/models`, `POST /v1/chat/completions`,
-  `GET /v1/usage`, `GET /v1/credits`, `GET /metrics`
+  `POST /v1/responses`, `GET /v1/usage`, `GET /v1/credits`, `GET /metrics`
+- Model sync helper: `MODEL_SYNC_BASE_URL=... MODEL_SYNC_API_KEY=... scripts/model-sync.sh`
+  for syncing OpenAI-compatible model ids from an upstream provider. The
+  helper uses `python3` for JSON parsing, so `jq` is not required.
 
 Tradeoff: this is less friendly than a web UI, but it keeps alpha scope small
 and makes correctness easy to validate in CI-like scripts.
@@ -64,8 +67,10 @@ The smoke covers:
 - model route creation
 - credit grant
 - model listing
+- model sync helper against the mock upstream
 - non-streaming chat
 - streaming chat
+- /v1/responses
 - usage and credit reads
 - Prometheus metrics scrape
 
@@ -90,5 +95,7 @@ boundary and latest local proof.
 - `provider secret key` errors mean set `MIZAN_PROVIDER_SECRET_KEY`.
 - Port conflicts can be avoided with `MIZAN_ALPHA_API_PORT` and
   `MIZAN_ALPHA_MOCK_PORT`.
+- If the first `cargo run -p mizan-api` build is slow, raise
+  `MIZAN_ALPHA_WAIT_SECONDS` for the smoke run.
 - If an existing API is already running at `MIZAN_BASE_URL`, the script reuses
   it and only starts the mock upstream.

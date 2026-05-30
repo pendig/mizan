@@ -19,13 +19,22 @@ provider/model routing, OpenAI-compatible non-streaming and streaming chat,
 usage metering, credit ledger updates, Redis runtime limits, and Prometheus
 gateway metrics.
 
+The long-term contract is:
+
+- Keep API-facing provider output in an OpenAI-compatible shape.
+- Support both `/v1/chat/completions` and `/v1/responses` through the same
+  normalization path.
+- Add non-API provider adapters later (CLI/browser session types) without changing
+  client contract.
+
 This is not a stable/full release yet. The remaining tracked work before a
 broader MVP is the RTK-backed CLI proxy baseline and durable request/admin
 audit log foundations.
 
 ## MVP Scope
 
-- OpenAI-compatible gateway for `/v1/chat/completions` and `/v1/models`
+- OpenAI-compatible gateway for `/v1/chat/completions`, `/v1/responses`, and
+  `/v1/models`
 - Admin-managed upstream connections for API providers and local models
 - User registration, virtual API keys, model access rules, and usage history
 - Credit accounting based on input/output token prices per 1M tokens
