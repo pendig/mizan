@@ -26,11 +26,9 @@ Included:
 Not included yet:
 
 - Stable/full release guarantee.
-- RTK-backed CLI proxy baseline.
-- Centralized gateway logging middleware refactor.
 - Production deployment hardening beyond local smoke validation.
-- Non-API provider adapters (for Codex/Gemini CLI/Claude-style auth/login flows)
-  before the broader MVP cut.
+- Non-API provider runtime adapters (for Codex/Gemini CLI/Claude-style
+  auth/login flows) beyond registration metadata and contract validation.
 
 ## Required Validation
 
@@ -79,10 +77,9 @@ Manual local validation on 2026-05-30 also confirmed:
 
 ## Remaining MVP Work
 
-These issues do not block the backend/API alpha pre-release. Issue #11 still
-matters for a broader MVP/stable release, while Issue #51 is a follow-up
-maintainability refactor that keeps the gateway boundary cleaner for later
-work:
+These issues do not block the backend/API alpha pre-release. The broader MVP
+still needs runtime adapters for non-API provider auth modes after the
+registration and contract metadata foundation:
 
-- Issue #11: integrate the RTK baseline into `mizan-rtk`.
-- Issue #51: refactor gateway logging flow to a centralized middleware pattern.
+- Issue #53: normalize provider adapters to a single OpenAI-compatible public
+  contract.

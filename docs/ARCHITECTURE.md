@@ -180,6 +180,17 @@ Adapter categories:
 Provider connection records should include encrypted secret material. The API
 never returns raw secrets after creation.
 
+Provider connection auth metadata is explicit:
+
+- `auth_mode = api_key` is the current runnable mode and requires `base_url`
+  plus encrypted provider API key material.
+- `auth_mode = subscription_cli` and `auth_mode = browser_session` can be
+  registered with non-secret `auth_config_json` reference metadata so the admin
+  API and storage model do not need another shape change later.
+- Non-API runtime adapters must reject raw tokens/passwords in registration
+  payloads and load secret material from an external secret reference when that
+  phase is implemented.
+
 ### Usage Meter
 
 The usage meter receives a normalized completed request record and creates:
