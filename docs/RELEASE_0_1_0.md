@@ -48,7 +48,7 @@ REDIS_URL=redis://127.0.0.1:6379/ MIZAN_ALPHA_API_PORT=18194 MIZAN_ALPHA_MOCK_PO
 
 ## Latest Proof
 
-Validated on 2026-05-31 from `main` at commit `798c178`:
+Validated on 2026-05-31 from the final `main` release candidate:
 
 - `cargo fmt --all -- --check` passed.
 - `cargo clippy --workspace --all-targets -- -D warnings` passed.
