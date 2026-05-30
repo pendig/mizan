@@ -96,5 +96,7 @@ boundary and latest local proof.
 - `provider secret key` errors mean set `MIZAN_PROVIDER_SECRET_KEY`.
 - Port conflicts can be avoided with `MIZAN_ALPHA_API_PORT` and
   `MIZAN_ALPHA_MOCK_PORT`.
+- If the first `cargo run -p mizan-api` build is slow, raise
+  `MIZAN_ALPHA_WAIT_SECONDS` for the smoke run.
 - If an existing API is already running at `MIZAN_BASE_URL`, the script reuses
   it and only starts the mock upstream.

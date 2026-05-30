@@ -3,6 +3,7 @@ set -euo pipefail
 
 API_PORT="${MIZAN_ALPHA_API_PORT:-18180}"
 MOCK_PORT="${MIZAN_ALPHA_MOCK_PORT:-18182}"
+WAIT_SECONDS="${MIZAN_ALPHA_WAIT_SECONDS:-600}"
 BASE_URL="${MIZAN_BASE_URL:-http://127.0.0.1:${API_PORT}}"
 MOCK_URL="${MIZAN_MOCK_BASE_URL:-http://127.0.0.1:${MOCK_PORT}}"
 ADMIN_EMAIL="${MIZAN_ADMIN_EMAIL:-admin@mizan.local}"
@@ -22,7 +23,7 @@ json_field() {
 
 wait_for() {
   local url="$1"
-  for _ in $(seq 1 60); do
+  for _ in $(seq 1 "${WAIT_SECONDS}"); do
     if curl -fsS "$url" >/dev/null 2>&1; then return 0; fi
     sleep 1
   done

@@ -69,6 +69,13 @@ connection creation, model route creation, credit grant, model listing,
 non-streaming chat, streaming chat, usage reads, credit reads, and Prometheus
 metrics scraping.
 
+Manual local validation on 2026-05-30 also confirmed:
+
+- `scripts/model-sync.sh` can sync the upstream mock model list.
+- The local `/v1/models` response is OpenAI-compatible and exposes the route-backed model list.
+- Non-streaming and streaming `POST /v1/chat/completions` work against the route-backed provider.
+- Usage and credit reads return after the completed requests.
+
 ## Remaining MVP Work
 
 These issues do not block the backend/API alpha pre-release, but they should
