@@ -79,8 +79,10 @@ Manual local validation on 2026-05-30 also confirmed:
 
 ## Remaining MVP Work
 
-These issues do not block the backend/API alpha pre-release, but they should
-block a broader MVP or stable release:
+These issues do not block the backend/API alpha pre-release. Issue #11 still
+matters for a broader MVP/stable release, while Issue #51 is a follow-up
+maintainability refactor that keeps the gateway boundary cleaner for later
+work:
 
 - Issue #11: integrate the RTK baseline into `mizan-rtk`.
 - Issue #51: refactor gateway logging flow to a centralized middleware pattern.
