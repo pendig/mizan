@@ -1,7 +1,7 @@
 use std::{net::SocketAddr, path::PathBuf, process, time::Duration};
 
 use clap::{Args, CommandFactory, Parser, Subcommand};
-use mizan_core::{AppError, AppResult, init_tracing, redact_for_logs};
+use mizan_core::{AppError, AppResult, init_tracing};
 use serde::Deserialize;
 use tokio::{net::TcpStream, time::timeout};
 use tracing::info;
@@ -187,6 +187,7 @@ fn required_field<T>(value: Option<T>, key: &'static str) -> AppResult<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mizan_core::redact_for_logs;
 
     const VALID_CONFIG: &str = r#"
 control_plane_url = "https://mizan.example.test"
