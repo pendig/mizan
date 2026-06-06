@@ -1,0 +1,15 @@
+[package]
+name = "mizan-daemon"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+mizan-core = { path = "../mizan-core" }
+serde.workspace = true
+tokio.workspace = true
+toml = "0.8"
+tracing.workspace = true

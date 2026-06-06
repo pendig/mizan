@@ -56,6 +56,7 @@ accounting unit used by the gateway to meter and control usage.
 
 - [Product Requirements](docs/PRD.md)
 - [Architecture](docs/ARCHITECTURE.md)
+- [Self-Hosted Distributed Proxy](docs/DISTRIBUTED_PROXY.md)
 - [Engineering Principles](docs/ENGINEERING_PRINCIPLES.md)
 - [MVP Roadmap](docs/MVP_ROADMAP.md)
 - [Backend Implementation Plan](docs/BACKEND_IMPLEMENTATION_PLAN.md)
@@ -143,6 +144,23 @@ Run the API locally:
 
 ```sh
 cargo run -p mizan-api
+```
+
+Run the self-hosted distributed proxy daemon:
+
+```sh
+cargo run -p mizan-daemon -- run --config ./mizan-daemon.toml
+```
+
+Minimal `mizan-daemon.toml`:
+
+```toml
+control_plane_url = "http://127.0.0.1:18180"
+daemon_token_path = "/run/secrets/mizan-daemon-token"
+local_provider_url = "http://127.0.0.1:11434/v1"
+advertised_models = ["llama3.1"]
+max_concurrency = 2
+health_addr = "127.0.0.1:19180"
 ```
 
 Run API, SQLite-backed storage, and Redis with Docker Compose:

@@ -4,6 +4,11 @@
 
 Build the MVP in Rust with Redis and SQLite-first storage.
 
+The v0.2.0 distributed proxy extension is described in
+[Self-Hosted Distributed Proxy](DISTRIBUTED_PROXY.md). That document defines
+the control-plane/data-plane split, daemon vocabulary, dispatch terms, and
+trust boundaries used by the distributed milestone.
+
 The practical recommendation is:
 
 - Rust for the gateway, backend APIs, and RTK-based CLI proxy layer.
