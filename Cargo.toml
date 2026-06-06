@@ -4,6 +4,7 @@ members = [
     "crates/mizan-api",
     "crates/mizan-cli",
     "crates/mizan-core",
+    "crates/mizan-daemon",
     "crates/mizan-gateway",
     "crates/mizan-limits",
     "crates/mizan-metering",
