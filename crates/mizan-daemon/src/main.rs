@@ -1,7 +1,9 @@
-use std::{collections::BTreeMap, net::SocketAddr, path::PathBuf, process, str::FromStr};
+use std::{net::SocketAddr, path::PathBuf, process, time::Duration};
 
 use clap::{Args, CommandFactory, Parser, Subcommand};
 use mizan_core::{AppError, AppResult, init_tracing, redact_for_logs};
+use serde::Deserialize;
+use tokio::{net::TcpStream, time::timeout};
 use tracing::info;
 
 #[tokio::main]
@@ -18,7 +20,7 @@ async fn execute() -> AppResult<()> {
     match cli.command {
         Some(Command::Run(args)) => run(args).await,
         Some(Command::ConfigCheck(args)) => config_check(args),
-        Some(Command::Health(args)) => health(args),
+        Some(Command::Health(args)) => health(args).await,
         None => {
             Cli::command().print_help()?;
             println!();
@@ -52,6 +54,9 @@ struct ConfigArgs {
 struct HealthArgs {
     #[arg(long, value_name = "PATH")]
     config: Option<PathBuf>,
+
+    #[arg(long, default_value_t = 1000, value_name = "MILLISECONDS")]
+    timeout_ms: u64,
 }
 
 async fn run(args: ConfigArgs) -> AppResult<()> {
@@ -60,7 +65,7 @@ async fn run(args: ConfigArgs) -> AppResult<()> {
 
     info!(
         control_plane_url = %config.control_plane_url,
-        daemon_token_path = %redact_for_logs(&config.daemon_token_path),
+        daemon_token_path = %config.daemon_token_path,
         local_provider_url = %config.local_provider_url,
         advertised_models = %config.advertised_models.join(","),
         max_concurrency = config.max_concurrency,
@@ -85,16 +90,28 @@ fn config_check(args: ConfigArgs) -> AppResult<()> {
     Ok(())
 }
 
-fn health(args: HealthArgs) -> AppResult<()> {
+async fn health(args: HealthArgs) -> AppResult<()> {
     if let Some(path) = args.config {
         let config = DaemonConfig::load(&path)?;
+        probe_health_addr(config.health_addr, args.timeout_ms).await?;
         println!(
-            "ok: daemon config valid; local health bind address {}",
+            "ok: daemon health endpoint reachable at {}",
             config.health_addr
         );
     } else {
         println!("ok: mizan-daemon process command is healthy");
     }
+    Ok(())
+}
+
+async fn probe_health_addr(addr: SocketAddr, timeout_ms: u64) -> AppResult<()> {
+    let timeout_duration = Duration::from_millis(timeout_ms.max(1));
+    timeout(timeout_duration, TcpStream::connect(addr))
+        .await
+        .map_err(|_| AppError::infrastructure(format!("health probe timed out for {addr}")))?
+        .map_err(|error| {
+            AppError::infrastructure(format!("health probe failed for {addr}: {error}"))
+        })?;
     Ok(())
 }
 
@@ -115,13 +132,16 @@ impl DaemonConfig {
     }
 
     fn parse(raw: &str) -> AppResult<Self> {
-        let values = parse_simple_toml(raw)?;
-        let control_plane_url = required_string(&values, "control_plane_url")?;
-        let daemon_token_path = required_string(&values, "daemon_token_path")?;
-        let local_provider_url = required_string(&values, "local_provider_url")?;
-        let advertised_models = required_list(&values, "advertised_models")?;
-        let max_concurrency = optional_u32(&values, "max_concurrency")?.unwrap_or(1);
-        let health_addr = optional_string(&values, "health_addr")?
+        let raw_config: RawDaemonConfig =
+            toml::from_str(raw).map_err(|error| AppError::config("config", error))?;
+        let control_plane_url = required_field(raw_config.control_plane_url, "control_plane_url")?;
+        let daemon_token_path = required_field(raw_config.daemon_token_path, "daemon_token_path")?;
+        let local_provider_url =
+            required_field(raw_config.local_provider_url, "local_provider_url")?;
+        let advertised_models = required_field(raw_config.advertised_models, "advertised_models")?;
+        let max_concurrency = raw_config.max_concurrency.unwrap_or(1);
+        let health_addr = raw_config
+            .health_addr
             .unwrap_or_else(|| "127.0.0.1:19180".to_owned())
             .parse::<SocketAddr>()
             .map_err(|error| AppError::config("health_addr", error))?;
@@ -150,72 +170,18 @@ impl DaemonConfig {
     }
 }
 
-fn parse_simple_toml(raw: &str) -> AppResult<BTreeMap<String, String>> {
-    let mut values = BTreeMap::new();
-
-    for (line_number, raw_line) in raw.lines().enumerate() {
-        let line = raw_line.split('#').next().unwrap_or_default().trim();
-        if line.is_empty() {
-            continue;
-        }
-        let Some((key, value)) = line.split_once('=') else {
-            return Err(AppError::invalid_config(
-                "config",
-                format!("line {} must use key = value", line_number + 1),
-            ));
-        };
-        values.insert(key.trim().to_owned(), value.trim().to_owned());
-    }
-
-    Ok(values)
+#[derive(Debug, Deserialize)]
+struct RawDaemonConfig {
+    control_plane_url: Option<String>,
+    daemon_token_path: Option<String>,
+    local_provider_url: Option<String>,
+    advertised_models: Option<Vec<String>>,
+    max_concurrency: Option<u32>,
+    health_addr: Option<String>,
 }
 
-fn required_string(values: &BTreeMap<String, String>, key: &'static str) -> AppResult<String> {
-    optional_string(values, key)?.ok_or_else(|| AppError::invalid_config(key, "is required"))
-}
-
-fn optional_string(
-    values: &BTreeMap<String, String>,
-    key: &'static str,
-) -> AppResult<Option<String>> {
-    values
-        .get(key)
-        .map(|value| parse_quoted_string(value, key))
-        .transpose()
-}
-
-fn required_list(values: &BTreeMap<String, String>, key: &'static str) -> AppResult<Vec<String>> {
-    let Some(value) = values.get(key) else {
-        return Err(AppError::invalid_config(key, "is required"));
-    };
-    let trimmed = value.trim();
-    if !trimmed.starts_with('[') || !trimmed.ends_with(']') {
-        return Err(AppError::invalid_config(key, "must be a string array"));
-    }
-    let inner = &trimmed[1..trimmed.len() - 1];
-    if inner.trim().is_empty() {
-        return Ok(Vec::new());
-    }
-
-    inner
-        .split(',')
-        .map(|item| parse_quoted_string(item.trim(), key))
-        .collect()
-}
-
-fn optional_u32(values: &BTreeMap<String, String>, key: &'static str) -> AppResult<Option<u32>> {
-    values
-        .get(key)
-        .map(|value| u32::from_str(value.trim()).map_err(|error| AppError::config(key, error)))
-        .transpose()
-}
-
-fn parse_quoted_string(value: &str, key: &'static str) -> AppResult<String> {
-    let trimmed = value.trim();
-    if !trimmed.starts_with('"') || !trimmed.ends_with('"') || trimmed.len() < 2 {
-        return Err(AppError::invalid_config(key, "must be a quoted string"));
-    }
-    Ok(trimmed[1..trimmed.len() - 1].to_owned())
+fn required_field<T>(value: Option<T>, key: &'static str) -> AppResult<T> {
+    value.ok_or_else(|| AppError::invalid_config(key, "is required"))
 }
 
 #[cfg(test)]
@@ -244,6 +210,27 @@ health_addr = "127.0.0.1:19180"
         assert_eq!(
             config.health_addr,
             "127.0.0.1:19180".parse::<SocketAddr>().unwrap()
+        );
+    }
+
+    #[test]
+    fn parses_toml_strings_with_comment_and_comma_characters() {
+        let raw = VALID_CONFIG
+            .replace(
+                "/run/secrets/mizan-daemon-token",
+                "/run/secrets/mizan#daemon-token",
+            )
+            .replace(
+                r#""llama3.1", "qwen2.5-coder""#,
+                r#""llama3.1", "qwen2.5, coder""#,
+            );
+
+        let config = DaemonConfig::parse(&raw).expect("config should parse");
+
+        assert_eq!(config.daemon_token_path, "/run/secrets/mizan#daemon-token");
+        assert_eq!(
+            config.advertised_models,
+            vec!["llama3.1".to_owned(), "qwen2.5, coder".to_owned()]
         );
     }
 

@@ -11,4 +11,5 @@ clap = { version = "4", features = ["derive"] }
 mizan-core = { path = "../mizan-core" }
 serde.workspace = true
 tokio.workspace = true
+toml = "0.8"
 tracing.workspace = true
