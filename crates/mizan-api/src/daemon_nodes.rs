@@ -136,7 +136,7 @@ pub struct DaemonCapabilityPayload {
     pub metadata: Option<Value>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct DaemonCapabilityResponse {
     pub provider_family: Option<String>,
     pub model_ids: Vec<String>,
@@ -148,6 +148,7 @@ pub struct DaemonCapabilityResponse {
     pub metadata: Option<Value>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EligibleDaemonNode {
     pub id: Uuid,
@@ -644,6 +645,7 @@ fn daemon_node_response(row: DbDaemonNode) -> Result<DaemonNodeResponse, AppErro
     })
 }
 
+#[allow(dead_code)]
 pub async fn select_eligible_daemon_node(
     database: &AnyPool,
     database_backend: DatabaseBackend,
@@ -704,21 +706,6 @@ pub async fn select_eligible_daemon_node(
     }
 
     Ok(None)
-}
-
-impl Default for DaemonCapabilityResponse {
-    fn default() -> Self {
-        Self {
-            provider_family: None,
-            model_ids: Vec::new(),
-            max_concurrency: None,
-            pricing_metadata: None,
-            region: None,
-            labels: Vec::new(),
-            health_status: None,
-            metadata: None,
-        }
-    }
 }
 
 fn normalized_capability_response(value: NormalizedCapabilities) -> DaemonCapabilityResponse {
