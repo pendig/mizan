@@ -139,6 +139,7 @@ mod tests {
             "usage_events",
             "request_logs",
             "admin_audit_logs",
+            "daemon_nodes",
         ];
 
         let expected_indexes = [
@@ -159,6 +160,10 @@ mod tests {
             "idx_provider_connections_enabled",
             "idx_model_routes_public_model",
             "idx_wallets_owner_user_id",
+            "idx_daemon_nodes_host_user_id",
+            "idx_daemon_nodes_status",
+            "idx_daemon_nodes_last_seen_at",
+            "idx_daemon_nodes_token_hash",
         ];
 
         for expected in expected_tables {

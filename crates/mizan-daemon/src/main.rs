@@ -2,7 +2,7 @@ use std::{net::SocketAddr, path::PathBuf, process, time::Duration};
 
 use clap::{Args, CommandFactory, Parser, Subcommand};
 use mizan_core::{AppError, AppResult, init_tracing};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tokio::{net::TcpStream, time::timeout};
 use tracing::info;
 
@@ -19,6 +19,7 @@ async fn execute() -> AppResult<()> {
 
     match cli.command {
         Some(Command::Run(args)) => run(args).await,
+        Some(Command::Register(args)) => register(args).await,
         Some(Command::ConfigCheck(args)) => config_check(args),
         Some(Command::Health(args)) => health(args).await,
         None => {
@@ -40,6 +41,7 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     Run(ConfigArgs),
+    Register(ConfigArgs),
     ConfigCheck(ConfigArgs),
     Health(HealthArgs),
 }
@@ -72,8 +74,68 @@ async fn run(args: ConfigArgs) -> AppResult<()> {
         health_addr = %config.health_addr,
         "mizan daemon startup configuration loaded"
     );
-    info!("daemon registration is prepared; node registration lands in the next milestone task");
+    info!("daemon registration is available with `mizan-daemon register --config <path>`");
 
+    Ok(())
+}
+
+async fn register(args: ConfigArgs) -> AppResult<()> {
+    let config = DaemonConfig::load(&args.config)?;
+    init_tracing("mizan_daemon=info,mizan_core=info")?;
+
+    let token = std::fs::read_to_string(&config.daemon_token_path)
+        .map_err(|error| AppError::config("daemon_token_path", error))?;
+    let token = token.trim();
+    if token.is_empty() {
+        return Err(AppError::invalid_config(
+            "daemon_token_path",
+            "daemon token file is empty",
+        ));
+    }
+
+    let registration_url = control_plane_endpoint(&config.control_plane_url, "/daemon/register");
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|error| AppError::infrastructure(format!("daemon http client failed: {error}")))?;
+
+    let response = client
+        .post(&registration_url)
+        .bearer_auth(token)
+        .json(&DaemonRegistrationRequest {
+            hostname: std::env::var("HOSTNAME")
+                .ok()
+                .map(|value| value.trim().to_owned())
+                .filter(|value| !value.is_empty()),
+            public_key: None,
+        })
+        .send()
+        .await
+        .map_err(|error| {
+            AppError::infrastructure(format!("daemon registration failed: {error}"))
+        })?;
+
+    let status = response.status();
+    if !status.is_success() {
+        return Err(AppError::infrastructure(format!(
+            "daemon registration rejected by control plane with status {status}"
+        )));
+    }
+
+    let body: DaemonRegistrationResponse = response.json().await.map_err(|error| {
+        AppError::infrastructure(format!("invalid daemon registration response: {error}"))
+    })?;
+
+    info!(
+        node_id = %body.node_id,
+        status = %body.status,
+        last_seen_at = %body.last_seen_at,
+        "daemon node registered with control plane"
+    );
+    println!(
+        "ok: daemon node {} registered status={} last_seen_at={}",
+        body.node_id, body.status, body.last_seen_at
+    );
     Ok(())
 }
 
@@ -180,8 +242,29 @@ struct RawDaemonConfig {
     health_addr: Option<String>,
 }
 
+#[derive(Debug, Serialize)]
+struct DaemonRegistrationRequest {
+    hostname: Option<String>,
+    public_key: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DaemonRegistrationResponse {
+    node_id: String,
+    status: String,
+    last_seen_at: String,
+}
+
 fn required_field<T>(value: Option<T>, key: &'static str) -> AppResult<T> {
     value.ok_or_else(|| AppError::invalid_config(key, "is required"))
+}
+
+fn control_plane_endpoint(control_plane_url: &str, path: &str) -> String {
+    format!(
+        "{}/{}",
+        control_plane_url.trim_end_matches('/'),
+        path.trim_start_matches('/')
+    )
 }
 
 #[cfg(test)]
@@ -249,6 +332,14 @@ health_addr = "127.0.0.1:19180"
         let error = DaemonConfig::parse(&raw).expect_err("config should fail");
 
         assert!(error.to_string().contains("max_concurrency"));
+    }
+
+    #[test]
+    fn builds_registration_endpoint_without_double_slashes() {
+        assert_eq!(
+            control_plane_endpoint("https://mizan.example.test/", "/daemon/register"),
+            "https://mizan.example.test/daemon/register"
+        );
     }
 
     #[test]
