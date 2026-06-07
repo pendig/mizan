@@ -31,8 +31,11 @@ pub fn prepare_sql(database_backend: DatabaseBackend, query: &'_ str) -> String 
     }
 }
 
-pub fn is_enabled(raw: i64) -> bool {
-    raw != 0
+pub fn is_enabled<T>(raw: T) -> bool
+where
+    T: Into<i64>,
+{
+    raw.into() != 0
 }
 
 pub fn parse_timestamp(raw: &str) -> AppResult<i64> {

@@ -16,8 +16,8 @@ use crate::AppState;
 use crate::auth::ApiKeyIdentity;
 use crate::logging::{AdminAuditInput, record_admin_audit, serialize_payload};
 use crate::utils::{
-    from_app_error, is_enabled, is_unique_constraint_error, now_utc_epoch_seconds, parse_timestamp,
-    prepare_sql, unix_timestamp_string,
+    from_app_error, is_enabled, is_unique_constraint_error, now_utc_epoch_seconds, prepare_sql,
+    unix_timestamp_string,
 };
 
 type DaemonNodeHttpResult<T> = Result<T, (StatusCode, Json<ErrorEnvelope>)>;
@@ -171,12 +171,12 @@ struct DbDaemonNode {
     hostname: Option<String>,
     public_key: Option<String>,
     status: String,
-    revoked: i64,
-    disabled: i64,
+    revoked: i32,
+    disabled: i32,
     last_seen_at: Option<String>,
     provider_family: Option<String>,
     model_ids_json: String,
-    max_concurrency: Option<i64>,
+    max_concurrency: Option<i32>,
     pricing_metadata_json: Option<String>,
     region: Option<String>,
     labels_json: String,
@@ -544,8 +544,15 @@ async fn mark_node_seen(
         .bind(public_key.as_deref())
         .bind(&capabilities.provider_family)
         .bind(serialize_json(&capabilities.model_ids)?)
-        .bind(i64::from(capabilities.max_concurrency))
-        .bind(serialize_optional_json(capabilities.pricing_metadata.as_ref())?)
+        .bind(i32::try_from(capabilities.max_concurrency).map_err(|_| {
+            AppError::invalid_config(
+                "daemon_capabilities.max_concurrency",
+                "max_concurrency exceeds database integer range",
+            )
+        })?)
+        .bind(serialize_optional_json(
+            capabilities.pricing_metadata.as_ref(),
+        )?)
         .bind(capabilities.region.as_deref())
         .bind(serialize_json(&capabilities.labels)?)
         .bind(&capabilities.health_status)
@@ -648,7 +655,8 @@ pub async fn select_eligible_daemon_node(
     }
 
     let cutoff = now_utc_epoch_seconds().saturating_sub(stale_after_seconds.max(1));
-    let rows = query_as::<_, (String, String, String, i64, String)>(&prepare_sql(
+    let cutoff = cutoff.to_string();
+    let rows = query_as::<_, (String, String, String, i32, String)>(&prepare_sql(
         database_backend,
         "SELECT id, provider_family, model_ids_json, max_concurrency, last_seen_at
          FROM daemon_nodes
@@ -659,28 +667,24 @@ pub async fn select_eligible_daemon_node(
            AND provider_family IS NOT NULL
            AND max_concurrency IS NOT NULL
            AND last_seen_at IS NOT NULL
+           AND last_seen_at >= ?
          ORDER BY last_seen_at DESC, created_at ASC",
     ))
     .bind(STATUS_ACTIVE)
     .bind(HEALTH_STATUS_HEALTHY)
+    .bind(&cutoff)
     .fetch_all(database)
     .await
     .map_err(|error| AppError::infrastructure(error.to_string()))?;
 
     for (id, provider_family, model_ids_json, max_concurrency, last_seen_at) in rows {
-        let last_seen = parse_timestamp(&last_seen_at)?;
-        if last_seen < cutoff {
-            continue;
-        }
-
         let model_ids = parse_json_vec(&model_ids_json, "daemon_node.model_ids_json")?;
         if !model_ids.iter().any(|candidate| candidate == model_id) {
             continue;
         }
 
-        let max_concurrency = u32::try_from(max_concurrency).map_err(|_| {
-            AppError::infrastructure("stored daemon max_concurrency is invalid")
-        })?;
+        let max_concurrency = u32::try_from(max_concurrency)
+            .map_err(|_| AppError::infrastructure("stored daemon max_concurrency is invalid"))?;
         if max_concurrency == 0 {
             continue;
         }
@@ -733,9 +737,8 @@ fn daemon_capability_response(row: &DbDaemonNode) -> Result<DaemonCapabilityResp
     let max_concurrency = row
         .max_concurrency
         .map(|value| {
-            u32::try_from(value).map_err(|_| {
-                AppError::infrastructure("stored daemon max_concurrency is invalid")
-            })
+            u32::try_from(value)
+                .map_err(|_| AppError::infrastructure("stored daemon max_concurrency is invalid"))
         })
         .transpose()?;
 
@@ -1047,8 +1050,8 @@ mod tests {
     async fn daemon_selection_excludes_stale_disabled_and_unhealthy_nodes() {
         let database = sqlite_test_database().await;
         let now = now_utc_epoch_seconds();
-        let online = insert_selectable_node(&database, "llama3.1", now, 0, HEALTH_STATUS_HEALTHY)
-            .await;
+        let online =
+            insert_selectable_node(&database, "llama3.1", now, 0, HEALTH_STATUS_HEALTHY).await;
         insert_selectable_node(&database, "llama3.1", now - 120, 0, HEALTH_STATUS_HEALTHY).await;
         insert_selectable_node(&database, "llama3.1", now, 1, HEALTH_STATUS_HEALTHY).await;
         insert_selectable_node(&database, "llama3.1", now, 0, "degraded").await;
@@ -1123,7 +1126,7 @@ mod tests {
         database: &AnyPool,
         model_id: &str,
         last_seen_at: i64,
-        disabled: i64,
+        disabled: i32,
         health_status: &str,
     ) -> Uuid {
         let node_id = Uuid::now_v7();
@@ -1155,7 +1158,7 @@ mod tests {
         .bind(last_seen_at.to_string())
         .bind("openai-compatible")
         .bind(serialize_json(&vec![model_id.to_owned()]).expect("serialize model ids"))
-        .bind(4_i64)
+        .bind(4_i32)
         .bind(health_status)
         .bind(&now)
         .bind(&now)

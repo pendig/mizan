@@ -525,7 +525,10 @@ heartbeat_interval_seconds = 15
 
     #[test]
     fn rejects_zero_heartbeat_interval() {
-        let raw = VALID_CONFIG.replace("heartbeat_interval_seconds = 15", "heartbeat_interval_seconds = 0");
+        let raw = VALID_CONFIG.replace(
+            "heartbeat_interval_seconds = 15",
+            "heartbeat_interval_seconds = 0",
+        );
         let error = DaemonConfig::parse(&raw).expect_err("config should fail");
 
         assert!(error.to_string().contains("heartbeat_interval_seconds"));
