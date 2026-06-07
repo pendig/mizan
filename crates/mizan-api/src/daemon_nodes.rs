@@ -618,6 +618,7 @@ async fn revoke_node(
 fn daemon_node_response(row: DbDaemonNode) -> Result<DaemonNodeResponse, AppError> {
     let id = Uuid::parse_str(&row.id)
         .map_err(|error| AppError::infrastructure(format!("invalid daemon node id: {error}")))?;
+    let capabilities = daemon_capability_response(&row)?;
     let host_user_id = row
         .host_user_id
         .as_deref()
@@ -637,7 +638,7 @@ fn daemon_node_response(row: DbDaemonNode) -> Result<DaemonNodeResponse, AppErro
         revoked: is_enabled(row.revoked),
         disabled: is_enabled(row.disabled),
         last_seen_at: row.last_seen_at,
-        capabilities: daemon_capability_response(&row)?,
+        capabilities,
         created_at: row.created_at,
         updated_at: row.updated_at,
     })
