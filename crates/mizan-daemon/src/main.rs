@@ -3,8 +3,12 @@ use std::{net::SocketAddr, path::PathBuf, process, time::Duration};
 use clap::{Args, CommandFactory, Parser, Subcommand};
 use mizan_core::{AppError, AppResult, init_tracing};
 use serde::{Deserialize, Serialize};
-use tokio::{net::TcpStream, time::timeout};
-use tracing::info;
+use serde_json::Value;
+use tokio::{
+    net::TcpStream,
+    time::{sleep, timeout},
+};
+use tracing::{info, warn};
 
 #[tokio::main]
 async fn main() {
@@ -64,6 +68,9 @@ struct HealthArgs {
 async fn run(args: ConfigArgs) -> AppResult<()> {
     let config = DaemonConfig::load(&args.config)?;
     init_tracing("mizan_daemon=info,mizan_core=info")?;
+    let token = read_daemon_token(&config)?;
+    let heartbeat_url = control_plane_endpoint(&config.control_plane_url, "/daemon/heartbeat");
+    let client = daemon_http_client()?;
 
     info!(
         control_plane_url = %config.control_plane_url,
@@ -71,43 +78,53 @@ async fn run(args: ConfigArgs) -> AppResult<()> {
         local_provider_url = %config.local_provider_url,
         advertised_models = %config.advertised_models.join(","),
         max_concurrency = config.max_concurrency,
+        provider_family = %config.provider_family,
         health_addr = %config.health_addr,
+        heartbeat_interval_seconds = config.heartbeat_interval_seconds,
         "mizan daemon startup configuration loaded"
     );
     info!("daemon registration is available with `mizan-daemon register --config <path>`");
 
-    Ok(())
+    loop {
+        match send_heartbeat(&client, &heartbeat_url, &token, &config).await {
+            Ok(body) => {
+                info!(
+                    node_id = %body.node_id,
+                    status = %body.status,
+                    last_seen_at = %body.last_seen_at,
+                    "daemon heartbeat accepted by control plane"
+                );
+            }
+            Err(error) => {
+                warn!(error = %error, "daemon heartbeat failed");
+            }
+        }
+        sleep(Duration::from_secs(u64::from(
+            config.heartbeat_interval_seconds.max(1),
+        )))
+        .await;
+    }
 }
 
 async fn register(args: ConfigArgs) -> AppResult<()> {
     let config = DaemonConfig::load(&args.config)?;
     init_tracing("mizan_daemon=info,mizan_core=info")?;
 
-    let token = std::fs::read_to_string(&config.daemon_token_path)
-        .map_err(|error| AppError::config("daemon_token_path", error))?;
-    let token = token.trim();
-    if token.is_empty() {
-        return Err(AppError::invalid_config(
-            "daemon_token_path",
-            "daemon token file is empty",
-        ));
-    }
+    let token = read_daemon_token(&config)?;
 
     let registration_url = control_plane_endpoint(&config.control_plane_url, "/daemon/register");
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(30))
-        .build()
-        .map_err(|error| AppError::infrastructure(format!("daemon http client failed: {error}")))?;
+    let client = daemon_http_client()?;
 
     let response = client
         .post(&registration_url)
-        .bearer_auth(token)
+        .bearer_auth(&token)
         .json(&DaemonRegistrationRequest {
             hostname: std::env::var("HOSTNAME")
                 .ok()
                 .map(|value| value.trim().to_owned())
                 .filter(|value| !value.is_empty()),
             public_key: None,
+            capabilities: config.capabilities_payload(),
         })
         .send()
         .await
@@ -152,6 +169,59 @@ fn config_check(args: ConfigArgs) -> AppResult<()> {
     Ok(())
 }
 
+async fn send_heartbeat(
+    client: &reqwest::Client,
+    heartbeat_url: &str,
+    token: &str,
+    config: &DaemonConfig,
+) -> AppResult<DaemonHeartbeatResponse> {
+    let response = client
+        .post(heartbeat_url)
+        .bearer_auth(token)
+        .json(&DaemonHeartbeatRequest {
+            hostname: std::env::var("HOSTNAME")
+                .ok()
+                .map(|value| value.trim().to_owned())
+                .filter(|value| !value.is_empty()),
+            public_key: None,
+            capabilities: config.capabilities_payload(),
+        })
+        .send()
+        .await
+        .map_err(|error| AppError::infrastructure(format!("daemon heartbeat failed: {error}")))?;
+
+    let status = response.status();
+    if !status.is_success() {
+        return Err(AppError::infrastructure(format!(
+            "daemon heartbeat rejected by control plane with status {status}"
+        )));
+    }
+
+    response.json().await.map_err(|error| {
+        AppError::infrastructure(format!("invalid daemon heartbeat response: {error}"))
+    })
+}
+
+fn read_daemon_token(config: &DaemonConfig) -> AppResult<String> {
+    let token = std::fs::read_to_string(&config.daemon_token_path)
+        .map_err(|error| AppError::config("daemon_token_path", error))?;
+    let token = token.trim();
+    if token.is_empty() {
+        return Err(AppError::invalid_config(
+            "daemon_token_path",
+            "daemon token file is empty",
+        ));
+    }
+    Ok(token.to_owned())
+}
+
+fn daemon_http_client() -> AppResult<reqwest::Client> {
+    reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|error| AppError::infrastructure(format!("daemon http client failed: {error}")))
+}
+
 async fn health(args: HealthArgs) -> AppResult<()> {
     if let Some(path) = args.config {
         let config = DaemonConfig::load(&path)?;
@@ -177,14 +247,19 @@ async fn probe_health_addr(addr: SocketAddr, timeout_ms: u64) -> AppResult<()> {
     Ok(())
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 struct DaemonConfig {
     control_plane_url: String,
     daemon_token_path: String,
     local_provider_url: String,
+    provider_family: String,
     advertised_models: Vec<String>,
     max_concurrency: u32,
+    pricing_metadata: Option<Value>,
+    region: Option<String>,
+    labels: Vec<String>,
     health_addr: SocketAddr,
+    heartbeat_interval_seconds: u32,
 }
 
 impl DaemonConfig {
@@ -200,6 +275,11 @@ impl DaemonConfig {
         let daemon_token_path = required_field(raw_config.daemon_token_path, "daemon_token_path")?;
         let local_provider_url =
             required_field(raw_config.local_provider_url, "local_provider_url")?;
+        let provider_family = raw_config
+            .provider_family
+            .unwrap_or_else(|| "openai-compatible".to_owned())
+            .trim()
+            .to_ascii_lowercase();
         let advertised_models = required_field(raw_config.advertised_models, "advertised_models")?;
         let max_concurrency = raw_config.max_concurrency.unwrap_or(1);
         let health_addr = raw_config
@@ -214,9 +294,22 @@ impl DaemonConfig {
                 "at least one model is required",
             ));
         }
+        if provider_family.is_empty() {
+            return Err(AppError::invalid_config(
+                "provider_family",
+                "provider_family is required",
+            ));
+        }
         if max_concurrency == 0 {
             return Err(AppError::invalid_config(
                 "max_concurrency",
+                "must be greater than zero",
+            ));
+        }
+        let heartbeat_interval_seconds = raw_config.heartbeat_interval_seconds.unwrap_or(30);
+        if heartbeat_interval_seconds == 0 {
+            return Err(AppError::invalid_config(
+                "heartbeat_interval_seconds",
                 "must be greater than zero",
             ));
         }
@@ -225,10 +318,34 @@ impl DaemonConfig {
             control_plane_url,
             daemon_token_path,
             local_provider_url,
+            provider_family,
             advertised_models,
             max_concurrency,
+            pricing_metadata: raw_config.pricing_metadata,
+            region: raw_config
+                .region
+                .map(|value| value.trim().to_owned())
+                .filter(|value| !value.is_empty()),
+            labels: normalize_string_list(raw_config.labels.unwrap_or_default()),
             health_addr,
+            heartbeat_interval_seconds,
         })
+    }
+
+    fn capabilities_payload(&self) -> DaemonCapabilityPayload {
+        DaemonCapabilityPayload {
+            provider_family: self.provider_family.clone(),
+            model_ids: self.advertised_models.clone(),
+            max_concurrency: self.max_concurrency,
+            pricing_metadata: self.pricing_metadata.clone(),
+            region: self.region.clone(),
+            labels: self.labels.clone(),
+            health_status: Some("healthy".to_owned()),
+            metadata: Some(serde_json::json!({
+                "local_provider_url": self.local_provider_url,
+                "health_addr": self.health_addr.to_string(),
+            })),
+        }
     }
 }
 
@@ -237,19 +354,51 @@ struct RawDaemonConfig {
     control_plane_url: Option<String>,
     daemon_token_path: Option<String>,
     local_provider_url: Option<String>,
+    provider_family: Option<String>,
     advertised_models: Option<Vec<String>>,
     max_concurrency: Option<u32>,
+    pricing_metadata: Option<Value>,
+    region: Option<String>,
+    labels: Option<Vec<String>>,
     health_addr: Option<String>,
+    heartbeat_interval_seconds: Option<u32>,
 }
 
 #[derive(Debug, Serialize)]
 struct DaemonRegistrationRequest {
     hostname: Option<String>,
     public_key: Option<String>,
+    capabilities: DaemonCapabilityPayload,
+}
+
+#[derive(Debug, Serialize)]
+struct DaemonHeartbeatRequest {
+    hostname: Option<String>,
+    public_key: Option<String>,
+    capabilities: DaemonCapabilityPayload,
+}
+
+#[derive(Debug, Serialize)]
+struct DaemonCapabilityPayload {
+    provider_family: String,
+    model_ids: Vec<String>,
+    max_concurrency: u32,
+    pricing_metadata: Option<Value>,
+    region: Option<String>,
+    labels: Vec<String>,
+    health_status: Option<String>,
+    metadata: Option<Value>,
 }
 
 #[derive(Debug, Deserialize)]
 struct DaemonRegistrationResponse {
+    node_id: String,
+    status: String,
+    last_seen_at: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct DaemonHeartbeatResponse {
     node_id: String,
     status: String,
     last_seen_at: String,
@@ -267,6 +416,22 @@ fn control_plane_endpoint(control_plane_url: &str, path: &str) -> String {
     )
 }
 
+fn normalize_string_list(values: Vec<String>) -> Vec<String> {
+    let mut normalized = Vec::new();
+    for value in values {
+        let value = value.trim();
+        if value.is_empty()
+            || normalized
+                .iter()
+                .any(|candidate: &String| candidate.as_str() == value)
+        {
+            continue;
+        }
+        normalized.push(value.to_owned());
+    }
+    normalized
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -276,9 +441,13 @@ mod tests {
 control_plane_url = "https://mizan.example.test"
 daemon_token_path = "/run/secrets/mizan-daemon-token"
 local_provider_url = "http://127.0.0.1:11434/v1"
+provider_family = "openai-compatible"
 advertised_models = ["llama3.1", "qwen2.5-coder"]
 max_concurrency = 4
+region = "local"
+labels = ["gpu", "lab"]
 health_addr = "127.0.0.1:19180"
+heartbeat_interval_seconds = 15
 "#;
 
     #[test]
@@ -290,11 +459,15 @@ health_addr = "127.0.0.1:19180"
             config.advertised_models,
             vec!["llama3.1".to_owned(), "qwen2.5-coder".to_owned()]
         );
+        assert_eq!(config.provider_family, "openai-compatible");
         assert_eq!(config.max_concurrency, 4);
+        assert_eq!(config.region.as_deref(), Some("local"));
+        assert_eq!(config.labels, vec!["gpu".to_owned(), "lab".to_owned()]);
         assert_eq!(
             config.health_addr,
             "127.0.0.1:19180".parse::<SocketAddr>().unwrap()
         );
+        assert_eq!(config.heartbeat_interval_seconds, 15);
     }
 
     #[test]
@@ -319,6 +492,22 @@ health_addr = "127.0.0.1:19180"
     }
 
     #[test]
+    fn builds_capability_payload_from_config() {
+        let config = DaemonConfig::parse(VALID_CONFIG).expect("config should parse");
+
+        let payload = config.capabilities_payload();
+
+        assert_eq!(payload.provider_family, "openai-compatible");
+        assert_eq!(
+            payload.model_ids,
+            vec!["llama3.1".to_owned(), "qwen2.5-coder".to_owned()]
+        );
+        assert_eq!(payload.max_concurrency, 4);
+        assert_eq!(payload.region.as_deref(), Some("local"));
+        assert_eq!(payload.health_status.as_deref(), Some("healthy"));
+    }
+
+    #[test]
     fn rejects_missing_required_fields() {
         let error = DaemonConfig::parse("control_plane_url = \"https://mizan.example.test\"")
             .expect_err("config should fail");
@@ -332,6 +521,17 @@ health_addr = "127.0.0.1:19180"
         let error = DaemonConfig::parse(&raw).expect_err("config should fail");
 
         assert!(error.to_string().contains("max_concurrency"));
+    }
+
+    #[test]
+    fn rejects_zero_heartbeat_interval() {
+        let raw = VALID_CONFIG.replace(
+            "heartbeat_interval_seconds = 15",
+            "heartbeat_interval_seconds = 0",
+        );
+        let error = DaemonConfig::parse(&raw).expect_err("config should fail");
+
+        assert!(error.to_string().contains("heartbeat_interval_seconds"));
     }
 
     #[test]

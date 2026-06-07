@@ -19,3 +19,8 @@ Current versions:
   - request_logs
   - admin_audit_logs
   - daemon_nodes
+- `0002_request_log_foundations.sql`
+- `0003_provider_auth_modes.sql`
+- `0004_daemon_nodes.sql`
+- `0005_daemon_capabilities.sql`
+  - daemon heartbeat capability fields and selection indexes
