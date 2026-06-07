@@ -18,6 +18,7 @@ use tracing::{info, warn};
 
 mod auth;
 mod billing;
+mod daemon_nodes;
 mod gateway;
 mod logging;
 mod metrics;
@@ -203,6 +204,26 @@ pub fn router(state: AppState) -> Router {
         .route_layer(from_fn(providers::require_admin_role))
         .route_layer(from_fn_with_state(state.clone(), auth::api_key_auth));
 
+    let daemon_admin_router = Router::new()
+        .route(
+            "/admin/daemon-nodes",
+            get(daemon_nodes::list_daemon_nodes).post(daemon_nodes::create_daemon_node),
+        )
+        .route(
+            "/admin/daemon-nodes/{id}",
+            delete(daemon_nodes::revoke_daemon_node),
+        )
+        .route_layer(from_fn(providers::require_admin_role))
+        .route_layer(from_fn_with_state(state.clone(), auth::api_key_auth));
+
+    let daemon_router = Router::new()
+        .route("/daemon/register", post(daemon_nodes::register_daemon_node))
+        .route("/daemon/ping", get(daemon_nodes::daemon_ping))
+        .route_layer(from_fn_with_state(
+            state.clone(),
+            daemon_nodes::daemon_node_auth,
+        ));
+
     Router::new()
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
@@ -213,6 +234,8 @@ pub fn router(state: AppState) -> Router {
         .merge(billing_router)
         .merge(provider_router)
         .merge(billing_admin_router)
+        .merge(daemon_admin_router)
+        .merge(daemon_router)
         .fallback(not_found)
         .layer(TraceLayer::new_for_http())
         .with_state(state)

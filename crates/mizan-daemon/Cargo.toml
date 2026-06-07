@@ -9,6 +9,7 @@ rust-version.workspace = true
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 mizan-core = { path = "../mizan-core" }
+reqwest.workspace = true
 serde.workspace = true
 tokio.workspace = true
 toml = "0.8"

@@ -13,6 +13,7 @@ pub mod tables {
     pub const USAGE_EVENTS: &str = "usage_events";
     pub const REQUEST_LOGS: &str = "request_logs";
     pub const ADMIN_AUDIT_LOGS: &str = "admin_audit_logs";
+    pub const DAEMON_NODES: &str = "daemon_nodes";
 }
 
 pub fn bool_to_i64(value: bool) -> i64 {
@@ -152,6 +153,21 @@ pub struct AdminAuditLogRecord {
     pub entity_id: Option<String>,
     pub payload_json: Option<String>,
     pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DaemonNodeRecord {
+    pub id: Uuid,
+    pub host_user_id: Option<Uuid>,
+    pub label: Option<String>,
+    pub hostname: Option<String>,
+    pub public_key: Option<String>,
+    pub token_hash: String,
+    pub status: String,
+    pub revoked: bool,
+    pub last_seen_at: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
 }
 
 #[cfg(test)]

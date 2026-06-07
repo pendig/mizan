@@ -18,3 +18,4 @@ Current versions:
   - usage_events
   - request_logs
   - admin_audit_logs
+  - daemon_nodes
