@@ -94,7 +94,12 @@ async fn register(args: ConfigArgs) -> AppResult<()> {
     }
 
     let registration_url = control_plane_endpoint(&config.control_plane_url, "/daemon/register");
-    let response = reqwest::Client::new()
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|error| AppError::infrastructure(format!("daemon http client failed: {error}")))?;
+
+    let response = client
         .post(&registration_url)
         .bearer_auth(token)
         .json(&DaemonRegistrationRequest {
@@ -106,7 +111,9 @@ async fn register(args: ConfigArgs) -> AppResult<()> {
         })
         .send()
         .await
-        .map_err(|error| AppError::infrastructure(format!("daemon registration failed: {error}")))?;
+        .map_err(|error| {
+            AppError::infrastructure(format!("daemon registration failed: {error}"))
+        })?;
 
     let status = response.status();
     if !status.is_success() {

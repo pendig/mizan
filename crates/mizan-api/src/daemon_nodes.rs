@@ -1,9 +1,9 @@
+use axum::Json;
 use axum::body::Body;
 use axum::extract::{Extension, Path, State};
 use axum::http::{Request, StatusCode, header::AUTHORIZATION};
 use axum::middleware::Next;
 use axum::response::Response;
-use axum::Json;
 use mizan_core::{AppError, DatabaseBackend, ErrorEnvelope};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -200,7 +200,7 @@ pub async fn create_daemon_node(
     let hostname = normalize_optional(payload.hostname);
     let public_key = normalize_optional(payload.public_key);
     let id = Uuid::now_v7();
-    let token = format!("{}{}", DAEMON_TOKEN_PREFIX, Uuid::now_v7());
+    let token = format!("{}{}", DAEMON_TOKEN_PREFIX, Uuid::new_v4());
     let token_hash = hash_value(&token);
     let now = unix_timestamp_string();
 
