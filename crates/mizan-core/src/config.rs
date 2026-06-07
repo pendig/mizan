@@ -21,6 +21,7 @@ pub struct AppConfig {
     pub admin_seed_role: String,
     pub provider_secret_key: Option<String>,
     pub log_raw_request_bodies: bool,
+    pub daemon_stale_seconds: u32,
 }
 
 impl AppConfig {
@@ -124,6 +125,16 @@ impl AppConfig {
                     "false",
                     |value| parse_bool_value("MIZAN_LOG_RAW_REQUEST_BODIES", value),
                 )?,
+                daemon_stale_seconds: env::var("MIZAN_DAEMON_STALE_SECONDS").map_or(
+                    Ok(DEFAULT_DAEMON_STALE_SECONDS),
+                    |value| {
+                        parse_u32_env(
+                            "MIZAN_DAEMON_STALE_SECONDS",
+                            &value,
+                            DEFAULT_DAEMON_STALE_SECONDS,
+                        )
+                    },
+                )?,
             })
         } else {
             Err(AppError::invalid_config(
@@ -206,6 +217,7 @@ fn parse_bool_value(key: &'static str, raw_value: &str) -> AppResult<bool> {
 const DEFAULT_DATABASE_MAX_CONNECTIONS: u32 = 10;
 const DEFAULT_LIMIT_WINDOW_SECONDS: u32 = 60;
 const DEFAULT_LIMIT_LEASE_SECONDS: u32 = 120;
+const DEFAULT_DAEMON_STALE_SECONDS: u32 = 90;
 
 fn parse_u32_env(key: &'static str, raw_value: &str, default: u32) -> AppResult<u32> {
     let value = raw_value.trim();

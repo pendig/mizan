@@ -158,9 +158,13 @@ Minimal `mizan-daemon.toml`:
 control_plane_url = "http://127.0.0.1:18180"
 daemon_token_path = "/run/secrets/mizan-daemon-token"
 local_provider_url = "http://127.0.0.1:11434/v1"
+provider_family = "openai-compatible"
 advertised_models = ["llama3.1"]
 max_concurrency = 2
+region = "local"
+labels = ["gpu"]
 health_addr = "127.0.0.1:19180"
+heartbeat_interval_seconds = 30
 ```
 
 Run API, SQLite-backed storage, and Redis with Docker Compose:

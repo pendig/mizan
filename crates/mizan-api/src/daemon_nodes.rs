@@ -6,9 +6,9 @@ use axum::middleware::Next;
 use axum::response::Response;
 use mizan_core::{AppError, DatabaseBackend, ErrorEnvelope};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use sqlx::{AnyPool, query, query_as};
+use sqlx::{AnyPool, FromRow, query, query_as};
 use tracing::{Instrument, info_span, warn};
 use uuid::Uuid;
 
@@ -16,7 +16,8 @@ use crate::AppState;
 use crate::auth::ApiKeyIdentity;
 use crate::logging::{AdminAuditInput, record_admin_audit, serialize_payload};
 use crate::utils::{
-    from_app_error, is_enabled, is_unique_constraint_error, prepare_sql, unix_timestamp_string,
+    from_app_error, is_enabled, is_unique_constraint_error, now_utc_epoch_seconds, parse_timestamp,
+    prepare_sql, unix_timestamp_string,
 };
 
 type DaemonNodeHttpResult<T> = Result<T, (StatusCode, Json<ErrorEnvelope>)>;
@@ -25,6 +26,7 @@ const DAEMON_TOKEN_PREFIX: &str = "mizan_sk_daemon_";
 const STATUS_PENDING: &str = "pending";
 const STATUS_ACTIVE: &str = "active";
 const STATUS_REVOKED: &str = "revoked";
+const HEALTH_STATUS_HEALTHY: &str = "healthy";
 const AUDIT_ACTION_CREATE_DAEMON_NODE: &str = "daemon_node_created";
 const AUDIT_ACTION_REVOKE_DAEMON_NODE: &str = "daemon_node_revoked";
 const AUDIT_ENTITY_DAEMON_NODE: &str = "daemon_node";
@@ -59,7 +61,9 @@ pub struct DaemonNodeResponse {
     pub public_key: Option<String>,
     pub status: String,
     pub revoked: bool,
+    pub disabled: bool,
     pub last_seen_at: Option<String>,
+    pub capabilities: DaemonCapabilityResponse,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -79,6 +83,8 @@ pub struct DaemonNodeRevokeResponse {
 pub struct DaemonRegistrationRequest {
     pub hostname: Option<String>,
     pub public_key: Option<String>,
+    #[serde(default)]
+    pub capabilities: Option<DaemonCapabilityPayload>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -86,6 +92,7 @@ pub struct DaemonRegistrationResponse {
     pub node_id: Uuid,
     pub status: String,
     pub last_seen_at: String,
+    pub capabilities: DaemonCapabilityResponse,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -95,13 +102,68 @@ pub struct DaemonPingResponse {
     pub last_seen_at: String,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct DaemonHeartbeatRequest {
+    #[serde(default)]
+    pub hostname: Option<String>,
+    #[serde(default)]
+    pub public_key: Option<String>,
+    pub capabilities: DaemonCapabilityPayload,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DaemonHeartbeatResponse {
+    pub node_id: Uuid,
+    pub status: String,
+    pub last_seen_at: String,
+    pub capabilities: DaemonCapabilityResponse,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct DaemonCapabilityPayload {
+    pub provider_family: String,
+    pub model_ids: Vec<String>,
+    pub max_concurrency: u32,
+    #[serde(default)]
+    pub pricing_metadata: Option<Value>,
+    #[serde(default)]
+    pub region: Option<String>,
+    #[serde(default)]
+    pub labels: Vec<String>,
+    #[serde(default)]
+    pub health_status: Option<String>,
+    #[serde(default)]
+    pub metadata: Option<Value>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DaemonCapabilityResponse {
+    pub provider_family: Option<String>,
+    pub model_ids: Vec<String>,
+    pub max_concurrency: Option<u32>,
+    pub pricing_metadata: Option<Value>,
+    pub region: Option<String>,
+    pub labels: Vec<String>,
+    pub health_status: Option<String>,
+    pub metadata: Option<Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EligibleDaemonNode {
+    pub id: Uuid,
+    pub provider_family: String,
+    pub model_id: String,
+    pub max_concurrency: u32,
+    pub last_seen_at: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct DaemonNodeIdentity {
     pub node_id: Uuid,
     pub status: String,
 }
 
-#[derive(Debug)]
+#[derive(Debug, FromRow)]
 struct DbDaemonNode {
     id: String,
     host_user_id: Option<String>,
@@ -110,29 +172,36 @@ struct DbDaemonNode {
     public_key: Option<String>,
     status: String,
     revoked: i64,
+    disabled: i64,
     last_seen_at: Option<String>,
+    provider_family: Option<String>,
+    model_ids_json: String,
+    max_concurrency: Option<i64>,
+    pricing_metadata_json: Option<String>,
+    region: Option<String>,
+    labels_json: String,
+    health_status: Option<String>,
+    capability_metadata_json: Option<String>,
     created_at: String,
     updated_at: String,
+}
+
+#[derive(Debug, Clone)]
+struct NormalizedCapabilities {
+    provider_family: String,
+    model_ids: Vec<String>,
+    max_concurrency: u32,
+    pricing_metadata: Option<Value>,
+    region: Option<String>,
+    labels: Vec<String>,
+    health_status: String,
+    metadata: Option<Value>,
 }
 
 pub async fn list_daemon_nodes(
     State(state): State<AppState>,
 ) -> DaemonNodeHttpResult<Json<DaemonNodeListResponse>> {
-    let rows = query_as::<
-        _,
-        (
-            String,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-            String,
-            i64,
-            Option<String>,
-            String,
-            String,
-        ),
-    >(&prepare_sql(
+    let rows = query_as::<_, DbDaemonNode>(&prepare_sql(
         state.database_backend(),
         "SELECT id,
                 host_user_id,
@@ -141,7 +210,16 @@ pub async fn list_daemon_nodes(
                 public_key,
                 status,
                 revoked,
+                disabled,
                 last_seen_at,
+                provider_family,
+                model_ids_json,
+                max_concurrency,
+                pricing_metadata_json,
+                region,
+                labels_json,
+                health_status,
+                capability_metadata_json,
                 created_at,
                 updated_at
          FROM daemon_nodes
@@ -153,33 +231,7 @@ pub async fn list_daemon_nodes(
 
     let data = rows
         .into_iter()
-        .map(
-            |(
-                id,
-                host_user_id,
-                label,
-                hostname,
-                public_key,
-                status,
-                revoked,
-                last_seen_at,
-                created_at,
-                updated_at,
-            )| {
-                daemon_node_response(DbDaemonNode {
-                    id,
-                    host_user_id,
-                    label,
-                    hostname,
-                    public_key,
-                    status,
-                    revoked,
-                    last_seen_at,
-                    created_at,
-                    updated_at,
-                })
-            },
-        )
+        .map(daemon_node_response)
         .collect::<Result<Vec<_>, _>>()
         .map_err(from_app_error)?;
 
@@ -301,12 +353,18 @@ pub async fn register_daemon_node(
     Extension(identity): Extension<DaemonNodeIdentity>,
     Json(payload): Json<DaemonRegistrationRequest>,
 ) -> DaemonNodeHttpResult<Json<DaemonRegistrationResponse>> {
+    let capabilities = payload
+        .capabilities
+        .map(normalize_capabilities)
+        .transpose()
+        .map_err(from_app_error)?;
     let last_seen_at = mark_node_seen(
         &state.database,
         state.database_backend(),
         identity.node_id,
         normalize_optional(payload.hostname),
         normalize_optional(payload.public_key),
+        capabilities.as_ref(),
     )
     .await
     .map_err(from_app_error)?;
@@ -315,6 +373,34 @@ pub async fn register_daemon_node(
         node_id: identity.node_id,
         status: STATUS_ACTIVE.to_owned(),
         last_seen_at,
+        capabilities: capabilities
+            .map(normalized_capability_response)
+            .unwrap_or_default(),
+    }))
+}
+
+pub async fn daemon_heartbeat(
+    State(state): State<AppState>,
+    Extension(identity): Extension<DaemonNodeIdentity>,
+    Json(payload): Json<DaemonHeartbeatRequest>,
+) -> DaemonNodeHttpResult<Json<DaemonHeartbeatResponse>> {
+    let capabilities = normalize_capabilities(payload.capabilities).map_err(from_app_error)?;
+    let last_seen_at = mark_node_seen(
+        &state.database,
+        state.database_backend(),
+        identity.node_id,
+        normalize_optional(payload.hostname),
+        normalize_optional(payload.public_key),
+        Some(&capabilities),
+    )
+    .await
+    .map_err(from_app_error)?;
+
+    Ok(Json(DaemonHeartbeatResponse {
+        node_id: identity.node_id,
+        status: STATUS_ACTIVE.to_owned(),
+        last_seen_at,
+        capabilities: normalized_capability_response(capabilities),
     }))
 }
 
@@ -326,6 +412,7 @@ pub async fn daemon_ping(
         &state.database,
         state.database_backend(),
         identity.node_id,
+        None,
         None,
         None,
     )
@@ -428,29 +515,69 @@ async fn mark_node_seen(
     node_id: Uuid,
     hostname: Option<String>,
     public_key: Option<String>,
+    capabilities: Option<&NormalizedCapabilities>,
 ) -> Result<String, AppError> {
     let now = unix_timestamp_string();
 
-    let result = query(&prepare_sql(
-        database_backend,
-        "UPDATE daemon_nodes
-         SET status = ?,
-             last_seen_at = ?,
-             hostname = COALESCE(?, hostname),
-             public_key = COALESCE(?, public_key),
-             updated_at = ?
-         WHERE id = ? AND revoked = 0 AND status != ?",
-    ))
-    .bind(STATUS_ACTIVE)
-    .bind(&now)
-    .bind(hostname.as_deref())
-    .bind(public_key.as_deref())
-    .bind(&now)
-    .bind(node_id.to_string())
-    .bind(STATUS_REVOKED)
-    .execute(database)
-    .await
-    .map_err(|error| AppError::infrastructure(error.to_string()))?;
+    let result = if let Some(capabilities) = capabilities {
+        query(&prepare_sql(
+            database_backend,
+            "UPDATE daemon_nodes
+             SET status = ?,
+                 last_seen_at = ?,
+                 hostname = COALESCE(?, hostname),
+                 public_key = COALESCE(?, public_key),
+                 provider_family = ?,
+                 model_ids_json = ?,
+                 max_concurrency = ?,
+                 pricing_metadata_json = ?,
+                 region = ?,
+                 labels_json = ?,
+                 health_status = ?,
+                 capability_metadata_json = ?,
+                 updated_at = ?
+             WHERE id = ? AND revoked = 0 AND status != ?",
+        ))
+        .bind(STATUS_ACTIVE)
+        .bind(&now)
+        .bind(hostname.as_deref())
+        .bind(public_key.as_deref())
+        .bind(&capabilities.provider_family)
+        .bind(serialize_json(&capabilities.model_ids)?)
+        .bind(i64::from(capabilities.max_concurrency))
+        .bind(serialize_optional_json(capabilities.pricing_metadata.as_ref())?)
+        .bind(capabilities.region.as_deref())
+        .bind(serialize_json(&capabilities.labels)?)
+        .bind(&capabilities.health_status)
+        .bind(serialize_optional_json(capabilities.metadata.as_ref())?)
+        .bind(&now)
+        .bind(node_id.to_string())
+        .bind(STATUS_REVOKED)
+        .execute(database)
+        .await
+        .map_err(|error| AppError::infrastructure(error.to_string()))?
+    } else {
+        query(&prepare_sql(
+            database_backend,
+            "UPDATE daemon_nodes
+             SET status = ?,
+                 last_seen_at = ?,
+                 hostname = COALESCE(?, hostname),
+                 public_key = COALESCE(?, public_key),
+                 updated_at = ?
+             WHERE id = ? AND revoked = 0 AND status != ?",
+        ))
+        .bind(STATUS_ACTIVE)
+        .bind(&now)
+        .bind(hostname.as_deref())
+        .bind(public_key.as_deref())
+        .bind(&now)
+        .bind(node_id.to_string())
+        .bind(STATUS_REVOKED)
+        .execute(database)
+        .await
+        .map_err(|error| AppError::infrastructure(error.to_string()))?
+    };
 
     if result.rows_affected() != 1 {
         return Err(AppError::Unauthorized);
@@ -501,10 +628,216 @@ fn daemon_node_response(row: DbDaemonNode) -> Result<DaemonNodeResponse, AppErro
         public_key: row.public_key,
         status: row.status,
         revoked: is_enabled(row.revoked),
+        disabled: is_enabled(row.disabled),
         last_seen_at: row.last_seen_at,
+        capabilities: daemon_capability_response(&row)?,
         created_at: row.created_at,
         updated_at: row.updated_at,
     })
+}
+
+pub async fn select_eligible_daemon_node(
+    database: &AnyPool,
+    database_backend: DatabaseBackend,
+    model_id: &str,
+    stale_after_seconds: i64,
+) -> Result<Option<EligibleDaemonNode>, AppError> {
+    let model_id = model_id.trim();
+    if model_id.is_empty() {
+        return Ok(None);
+    }
+
+    let cutoff = now_utc_epoch_seconds().saturating_sub(stale_after_seconds.max(1));
+    let rows = query_as::<_, (String, String, String, i64, String)>(&prepare_sql(
+        database_backend,
+        "SELECT id, provider_family, model_ids_json, max_concurrency, last_seen_at
+         FROM daemon_nodes
+         WHERE status = ?
+           AND revoked = 0
+           AND disabled = 0
+           AND health_status = ?
+           AND provider_family IS NOT NULL
+           AND max_concurrency IS NOT NULL
+           AND last_seen_at IS NOT NULL
+         ORDER BY last_seen_at DESC, created_at ASC",
+    ))
+    .bind(STATUS_ACTIVE)
+    .bind(HEALTH_STATUS_HEALTHY)
+    .fetch_all(database)
+    .await
+    .map_err(|error| AppError::infrastructure(error.to_string()))?;
+
+    for (id, provider_family, model_ids_json, max_concurrency, last_seen_at) in rows {
+        let last_seen = parse_timestamp(&last_seen_at)?;
+        if last_seen < cutoff {
+            continue;
+        }
+
+        let model_ids = parse_json_vec(&model_ids_json, "daemon_node.model_ids_json")?;
+        if !model_ids.iter().any(|candidate| candidate == model_id) {
+            continue;
+        }
+
+        let max_concurrency = u32::try_from(max_concurrency).map_err(|_| {
+            AppError::infrastructure("stored daemon max_concurrency is invalid")
+        })?;
+        if max_concurrency == 0 {
+            continue;
+        }
+
+        let id = Uuid::parse_str(&id).map_err(|error| {
+            AppError::infrastructure(format!("stored daemon node id is invalid: {error}"))
+        })?;
+
+        return Ok(Some(EligibleDaemonNode {
+            id,
+            provider_family,
+            model_id: model_id.to_owned(),
+            max_concurrency,
+            last_seen_at,
+        }));
+    }
+
+    Ok(None)
+}
+
+impl Default for DaemonCapabilityResponse {
+    fn default() -> Self {
+        Self {
+            provider_family: None,
+            model_ids: Vec::new(),
+            max_concurrency: None,
+            pricing_metadata: None,
+            region: None,
+            labels: Vec::new(),
+            health_status: None,
+            metadata: None,
+        }
+    }
+}
+
+fn normalized_capability_response(value: NormalizedCapabilities) -> DaemonCapabilityResponse {
+    DaemonCapabilityResponse {
+        provider_family: Some(value.provider_family),
+        model_ids: value.model_ids,
+        max_concurrency: Some(value.max_concurrency),
+        pricing_metadata: value.pricing_metadata,
+        region: value.region,
+        labels: value.labels,
+        health_status: Some(value.health_status),
+        metadata: value.metadata,
+    }
+}
+
+fn daemon_capability_response(row: &DbDaemonNode) -> Result<DaemonCapabilityResponse, AppError> {
+    let max_concurrency = row
+        .max_concurrency
+        .map(|value| {
+            u32::try_from(value).map_err(|_| {
+                AppError::infrastructure("stored daemon max_concurrency is invalid")
+            })
+        })
+        .transpose()?;
+
+    Ok(DaemonCapabilityResponse {
+        provider_family: row.provider_family.clone(),
+        model_ids: parse_json_vec(&row.model_ids_json, "daemon_node.model_ids_json")?,
+        max_concurrency,
+        pricing_metadata: parse_optional_json_value(
+            row.pricing_metadata_json.as_deref(),
+            "daemon_node.pricing_metadata_json",
+        )?,
+        region: row.region.clone(),
+        labels: parse_json_vec(&row.labels_json, "daemon_node.labels_json")?,
+        health_status: row.health_status.clone(),
+        metadata: parse_optional_json_value(
+            row.capability_metadata_json.as_deref(),
+            "daemon_node.capability_metadata_json",
+        )?,
+    })
+}
+
+fn normalize_capabilities(
+    payload: DaemonCapabilityPayload,
+) -> Result<NormalizedCapabilities, AppError> {
+    let provider_family = payload.provider_family.trim().to_ascii_lowercase();
+    if provider_family.is_empty() {
+        return Err(AppError::invalid_config(
+            "daemon_capabilities.provider_family",
+            "provider_family is required",
+        ));
+    }
+
+    let model_ids = normalize_string_list(payload.model_ids);
+    if model_ids.is_empty() {
+        return Err(AppError::invalid_config(
+            "daemon_capabilities.model_ids",
+            "at least one model id is required",
+        ));
+    }
+
+    if payload.max_concurrency == 0 {
+        return Err(AppError::invalid_config(
+            "daemon_capabilities.max_concurrency",
+            "must be greater than zero",
+        ));
+    }
+
+    let health_status = normalize_optional(payload.health_status)
+        .unwrap_or_else(|| HEALTH_STATUS_HEALTHY.to_owned())
+        .to_ascii_lowercase();
+
+    Ok(NormalizedCapabilities {
+        provider_family,
+        model_ids,
+        max_concurrency: payload.max_concurrency,
+        pricing_metadata: payload.pricing_metadata,
+        region: normalize_optional(payload.region),
+        labels: normalize_string_list(payload.labels),
+        health_status,
+        metadata: payload.metadata,
+    })
+}
+
+fn normalize_string_list(values: Vec<String>) -> Vec<String> {
+    let mut normalized = Vec::new();
+    for value in values {
+        let value = value.trim();
+        if value.is_empty()
+            || normalized
+                .iter()
+                .any(|candidate: &String| candidate.as_str() == value)
+        {
+            continue;
+        }
+        normalized.push(value.to_owned());
+    }
+    normalized
+}
+
+fn serialize_json(value: &impl Serialize) -> Result<String, AppError> {
+    serde_json::to_string(value)
+        .map_err(|error| AppError::infrastructure(format!("json serialization failed: {error}")))
+}
+
+fn serialize_optional_json(value: Option<&Value>) -> Result<Option<String>, AppError> {
+    value.map(serialize_json).transpose()
+}
+
+fn parse_json_vec(raw: &str, field_name: &'static str) -> Result<Vec<String>, AppError> {
+    serde_json::from_str(raw)
+        .map_err(|error| AppError::infrastructure(format!("{field_name} is invalid: {error}")))
+}
+
+fn parse_optional_json_value(
+    raw: Option<&str>,
+    field_name: &'static str,
+) -> Result<Option<Value>, AppError> {
+    raw.map(|value| {
+        serde_json::from_str(value)
+            .map_err(|error| AppError::infrastructure(format!("{field_name} is invalid: {error}")))
+    })
+    .transpose()
 }
 
 fn normalize_optional(value: Option<String>) -> Option<String> {
@@ -625,6 +958,7 @@ mod tests {
             node_id,
             Some("host-a".to_owned()),
             Some("ssh-ed25519 test".to_owned()),
+            None,
         )
         .await
         .expect("mark seen");
@@ -636,6 +970,120 @@ mod tests {
             .await
             .expect("read status");
         assert_eq!(status, STATUS_ACTIVE);
+    }
+
+    #[tokio::test]
+    async fn daemon_heartbeat_stores_capabilities() {
+        let database = sqlite_test_database().await;
+        let token = "mizan_sk_daemon_capable";
+        let node_id = insert_node(&database, token, false).await;
+        let capabilities = normalize_capabilities(DaemonCapabilityPayload {
+            provider_family: "openai-compatible".to_owned(),
+            model_ids: vec![" llama3.1 ".to_owned(), "qwen2.5-coder".to_owned()],
+            max_concurrency: 4,
+            pricing_metadata: Some(json!({"input_per_1m": 100})),
+            region: Some("iad".to_owned()),
+            labels: vec!["gpu".to_owned()],
+            health_status: None,
+            metadata: Some(json!({"local_provider_url": "http://127.0.0.1:11434/v1"})),
+        })
+        .expect("valid capabilities");
+
+        mark_node_seen(
+            &database,
+            DatabaseBackend::Sqlite,
+            node_id,
+            Some("host-b".to_owned()),
+            None,
+            Some(&capabilities),
+        )
+        .await
+        .expect("mark seen with capabilities");
+
+        let row: (String, String, i64, String, String) = query_as(
+            "SELECT provider_family, model_ids_json, max_concurrency, health_status, region
+             FROM daemon_nodes WHERE id = ?",
+        )
+        .bind(node_id.to_string())
+        .fetch_one(&database)
+        .await
+        .expect("read daemon capabilities");
+
+        assert_eq!(row.0, "openai-compatible");
+        assert_eq!(row.1, r#"["llama3.1","qwen2.5-coder"]"#);
+        assert_eq!(row.2, 4);
+        assert_eq!(row.3, HEALTH_STATUS_HEALTHY);
+        assert_eq!(row.4, "iad");
+    }
+
+    #[tokio::test]
+    async fn daemon_capability_validation_rejects_empty_models_and_zero_capacity() {
+        let empty_models = normalize_capabilities(DaemonCapabilityPayload {
+            provider_family: "openai-compatible".to_owned(),
+            model_ids: vec![" ".to_owned()],
+            max_concurrency: 1,
+            pricing_metadata: None,
+            region: None,
+            labels: Vec::new(),
+            health_status: None,
+            metadata: None,
+        });
+        assert!(empty_models.is_err());
+
+        let zero_capacity = normalize_capabilities(DaemonCapabilityPayload {
+            provider_family: "openai-compatible".to_owned(),
+            model_ids: vec!["llama3.1".to_owned()],
+            max_concurrency: 0,
+            pricing_metadata: None,
+            region: None,
+            labels: Vec::new(),
+            health_status: None,
+            metadata: None,
+        });
+        assert!(zero_capacity.is_err());
+    }
+
+    #[tokio::test]
+    async fn daemon_selection_excludes_stale_disabled_and_unhealthy_nodes() {
+        let database = sqlite_test_database().await;
+        let now = now_utc_epoch_seconds();
+        let online = insert_selectable_node(&database, "llama3.1", now, 0, HEALTH_STATUS_HEALTHY)
+            .await;
+        insert_selectable_node(&database, "llama3.1", now - 120, 0, HEALTH_STATUS_HEALTHY).await;
+        insert_selectable_node(&database, "llama3.1", now, 1, HEALTH_STATUS_HEALTHY).await;
+        insert_selectable_node(&database, "llama3.1", now, 0, "degraded").await;
+
+        let selected =
+            select_eligible_daemon_node(&database, DatabaseBackend::Sqlite, "llama3.1", 60)
+                .await
+                .expect("select daemon node")
+                .expect("online node should be selected");
+
+        assert_eq!(selected.id, online);
+    }
+
+    #[tokio::test]
+    async fn daemon_selection_returns_none_when_only_stale_nodes_match() {
+        let database = sqlite_test_database().await;
+        insert_selectable_node(
+            &database,
+            "self-hosted/gpt-oss",
+            now_utc_epoch_seconds() - 120,
+            0,
+            HEALTH_STATUS_HEALTHY,
+        )
+        .await;
+
+        let selected = select_eligible_daemon_node(
+            &database,
+            DatabaseBackend::Sqlite,
+            "self-hosted/gpt-oss",
+            60,
+        )
+        .await
+        .expect("select daemon node");
+
+        assert!(selected.is_none());
     }
 
     #[tokio::test]
@@ -669,5 +1117,51 @@ mod tests {
         .expect_err("revoked node should fail");
 
         assert_eq!(error.0, StatusCode::UNAUTHORIZED);
+    }
+
+    async fn insert_selectable_node(
+        database: &AnyPool,
+        model_id: &str,
+        last_seen_at: i64,
+        disabled: i64,
+        health_status: &str,
+    ) -> Uuid {
+        let node_id = Uuid::now_v7();
+        let user_id = seed_user(database).await;
+        let now = unix_timestamp_string();
+        query(&prepare_sql(
+            DatabaseBackend::Sqlite,
+            "INSERT INTO daemon_nodes (
+                 id,
+                 host_user_id,
+                 token_hash,
+                 status,
+                 revoked,
+                 disabled,
+                 last_seen_at,
+                 provider_family,
+                 model_ids_json,
+                 max_concurrency,
+                 health_status,
+                 created_at,
+                 updated_at
+             ) VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?)",
+        ))
+        .bind(node_id.to_string())
+        .bind(user_id.to_string())
+        .bind(hash_value(&format!("token-{node_id}")))
+        .bind(STATUS_ACTIVE)
+        .bind(disabled)
+        .bind(last_seen_at.to_string())
+        .bind("openai-compatible")
+        .bind(serialize_json(&vec![model_id.to_owned()]).expect("serialize model ids"))
+        .bind(4_i64)
+        .bind(health_status)
+        .bind(&now)
+        .bind(&now)
+        .execute(database)
+        .await
+        .expect("insert selectable daemon node");
+        node_id
     }
 }

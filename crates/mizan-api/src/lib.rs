@@ -218,6 +218,7 @@ pub fn router(state: AppState) -> Router {
 
     let daemon_router = Router::new()
         .route("/daemon/register", post(daemon_nodes::register_daemon_node))
+        .route("/daemon/heartbeat", post(daemon_nodes::daemon_heartbeat))
         .route("/daemon/ping", get(daemon_nodes::daemon_ping))
         .route_layer(from_fn_with_state(
             state.clone(),

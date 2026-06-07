@@ -164,6 +164,8 @@ mod tests {
             "idx_daemon_nodes_status",
             "idx_daemon_nodes_last_seen_at",
             "idx_daemon_nodes_token_hash",
+            "idx_daemon_nodes_disabled",
+            "idx_daemon_nodes_health_status",
         ];
 
         for expected in expected_tables {
