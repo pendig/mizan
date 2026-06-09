@@ -316,7 +316,15 @@ async fn list_public_models(
     .map_err(|error| AppError::infrastructure(error.to_string()))?;
 
     for (provider_family, model_ids_json) in daemon_rows {
-        for model_id in parse_json_vec(&model_ids_json, "daemon_node.model_ids_json")? {
+        let model_ids = match parse_json_vec(&model_ids_json, "daemon_node.model_ids_json") {
+            Ok(model_ids) => model_ids,
+            Err(error) => {
+                warn!(error = %error, "skipping daemon node with invalid model capabilities");
+                continue;
+            }
+        };
+
+        for model_id in model_ids {
             if !seen_model_ids.insert(model_id.clone()) {
                 continue;
             }
@@ -1088,5 +1096,49 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(ids, vec!["daemon-only", "route-backed"]);
+    }
+
+    #[tokio::test]
+    async fn list_public_models_skips_daemon_nodes_with_invalid_model_capabilities() {
+        let database = sqlite_test_database().await;
+        let now = now_utc_epoch_seconds();
+
+        insert_daemon_node(
+            &database,
+            vec!["healthy-daemon-model"],
+            now,
+            0,
+            HEALTH_STATUS_HEALTHY,
+            None,
+        )
+        .await;
+        insert_daemon_node(
+            &database,
+            vec!["corrupt-daemon-model"],
+            now,
+            0,
+            HEALTH_STATUS_HEALTHY,
+            None,
+        )
+        .await;
+        query(&prepare_sql(
+            DatabaseBackend::Sqlite,
+            "UPDATE daemon_nodes SET model_ids_json = ? WHERE model_ids_json = ?",
+        ))
+        .bind("{not-json")
+        .bind("[\"corrupt-daemon-model\"]")
+        .execute(&database)
+        .await
+        .expect("corrupt daemon model ids");
+
+        let models = list_public_models(&database, DatabaseBackend::Sqlite, 60)
+            .await
+            .expect("list public models");
+        let ids = models
+            .iter()
+            .map(|model| model.id.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(ids, vec!["healthy-daemon-model"]);
     }
 }

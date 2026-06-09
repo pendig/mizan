@@ -8,7 +8,7 @@ EXPECTED_MODEL="${MIZAN_DISTRIBUTED_MODEL:-}"
 RUN_CHAT="${MIZAN_DISTRIBUTED_RUN_CHAT:-0}"
 
 json_field() {
-  python3 -c 'import json,sys; data=json.load(sys.stdin); print(data["'$1'"])'
+  python3 -c 'import json,sys; data=json.load(sys.stdin); print(data[sys.argv[1]])' "$1"
 }
 
 echo "Registering ${EMAIL}"
