@@ -24,9 +24,9 @@ type DaemonNodeHttpResult<T> = Result<T, (StatusCode, Json<ErrorEnvelope>)>;
 
 const DAEMON_TOKEN_PREFIX: &str = "mizan_sk_daemon_";
 const STATUS_PENDING: &str = "pending";
-const STATUS_ACTIVE: &str = "active";
+pub(crate) const STATUS_ACTIVE: &str = "active";
 const STATUS_REVOKED: &str = "revoked";
-const HEALTH_STATUS_HEALTHY: &str = "healthy";
+pub(crate) const HEALTH_STATUS_HEALTHY: &str = "healthy";
 const AUDIT_ACTION_CREATE_DAEMON_NODE: &str = "daemon_node_created";
 const AUDIT_ACTION_REVOKE_DAEMON_NODE: &str = "daemon_node_revoked";
 const AUDIT_ENTITY_DAEMON_NODE: &str = "daemon_node";
@@ -815,7 +815,7 @@ fn serialize_optional_json(value: Option<&Value>) -> Result<Option<String>, AppE
     value.map(serialize_json).transpose()
 }
 
-fn parse_json_vec(raw: &str, field_name: &'static str) -> Result<Vec<String>, AppError> {
+pub(crate) fn parse_json_vec(raw: &str, field_name: &'static str) -> Result<Vec<String>, AppError> {
     serde_json::from_str(raw)
         .map_err(|error| AppError::infrastructure(format!("{field_name} is invalid: {error}")))
 }
