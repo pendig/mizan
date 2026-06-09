@@ -1,22 +1,25 @@
+use std::collections::HashSet;
+
 use axum::Json;
 use axum::body::Body;
 use axum::extract::{Extension, Path, State};
 use axum::http::StatusCode;
 use axum::middleware::Next;
 use axum::response::Response;
-use mizan_core::{AppError, ErrorEnvelope};
+use mizan_core::{AppError, DatabaseBackend, ErrorEnvelope};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use sqlx::{query, query_as};
+use sqlx::{AnyPool, query, query_as};
 use tracing::warn;
 use uuid::Uuid;
 
 use crate::AppState;
 use crate::auth::ApiKeyIdentity;
+use crate::daemon_nodes::{HEALTH_STATUS_HEALTHY, STATUS_ACTIVE, parse_json_vec};
 use crate::logging::{AdminAuditInput, record_admin_audit, serialize_payload};
 use crate::utils::{
     encrypt_provider_api_key, from_app_error, is_enabled, is_unique_constraint_error,
-    parse_timestamp, prepare_sql, unix_timestamp_string,
+    now_utc_epoch_seconds, parse_timestamp, prepare_sql, unix_timestamp_string,
 };
 
 type ProviderHttpResult<T> = Result<T, (StatusCode, Json<ErrorEnvelope>)>;
@@ -220,9 +223,28 @@ fn normalize_auth_config(
 pub async fn list_models(
     State(state): State<AppState>,
 ) -> ProviderHttpResult<Json<PublicModelsResponse>> {
+    let data = list_public_models(
+        &state.database,
+        state.database_backend(),
+        i64::from(state.config.daemon_stale_seconds),
+    )
+    .await
+    .map_err(from_app_error)?;
+
+    Ok(Json(PublicModelsResponse {
+        object: "list",
+        data,
+    }))
+}
+
+async fn list_public_models(
+    database: &AnyPool,
+    database_backend: DatabaseBackend,
+    daemon_stale_seconds: i64,
+) -> Result<Vec<PublicModelResponse>, AppError> {
     let rows =
         query_as::<_, (String, String, String, String, String, Option<i64>, String)>(&prepare_sql(
-            state.database_backend(),
+            database_backend,
             "SELECT mr.public_model,
                     mr.upstream_model,
                     mr.id,
@@ -238,11 +260,12 @@ pub async fn list_models(
         ))
         .bind(1)
         .bind(1)
-        .fetch_all(&state.database)
+        .fetch_all(database)
         .await
-        .map_err(|error| from_app_error(AppError::infrastructure(error.to_string())))?;
+        .map_err(|error| AppError::infrastructure(error.to_string()))?;
 
     let mut data = Vec::with_capacity(rows.len());
+    let mut seen_model_ids = HashSet::new();
 
     for (
         public_model,
@@ -254,7 +277,8 @@ pub async fn list_models(
         created_at,
     ) in rows
     {
-        let created = parse_timestamp(&created_at).map_err(from_app_error)?;
+        let created = parse_timestamp(&created_at)?;
+        seen_model_ids.insert(public_model.clone());
 
         data.push(PublicModelResponse {
             id: public_model.clone(),
@@ -268,10 +292,58 @@ pub async fn list_models(
         });
     }
 
-    Ok(Json(PublicModelsResponse {
-        object: "list",
-        data,
-    }))
+    let cutoff = now_utc_epoch_seconds().saturating_sub(daemon_stale_seconds.max(1));
+    let daemon_rows = query_as::<_, (String, String)>(&prepare_sql(
+        database_backend,
+        "SELECT provider_family, model_ids_json
+         FROM daemon_nodes
+         WHERE status = ?
+           AND revoked = 0
+           AND disabled = 0
+           AND health_status = ?
+           AND provider_family IS NOT NULL
+           AND max_concurrency IS NOT NULL
+           AND max_concurrency > 0
+           AND last_seen_at IS NOT NULL
+           AND last_seen_at >= ?
+         ORDER BY provider_family ASC, model_ids_json ASC",
+    ))
+    .bind(STATUS_ACTIVE)
+    .bind(HEALTH_STATUS_HEALTHY)
+    .bind(cutoff.to_string())
+    .fetch_all(database)
+    .await
+    .map_err(|error| AppError::infrastructure(error.to_string()))?;
+
+    for (provider_family, model_ids_json) in daemon_rows {
+        let model_ids = match parse_json_vec(&model_ids_json, "daemon_node.model_ids_json") {
+            Ok(model_ids) => model_ids,
+            Err(error) => {
+                warn!(error = %error, "skipping daemon node with invalid model capabilities");
+                continue;
+            }
+        };
+
+        for model_id in model_ids {
+            if !seen_model_ids.insert(model_id.clone()) {
+                continue;
+            }
+
+            data.push(PublicModelResponse {
+                id: model_id.clone(),
+                object: "model",
+                created: 0,
+                owned_by: "mizan-daemon".to_owned(),
+                provider_type: provider_family.clone(),
+                upstream_model: model_id,
+                route_id: "daemon".to_owned(),
+                max_tokens: None,
+            });
+        }
+    }
+
+    data.sort_by(|left, right| left.id.cmp(&right.id));
+    Ok(data)
 }
 
 pub async fn list_provider_connections(
@@ -784,6 +856,137 @@ fn map_duplicate_model_error(error: String) -> AppError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage;
+
+    async fn sqlite_test_database() -> AnyPool {
+        storage::connect_and_migrate("sqlite::memory:", true, 1)
+            .await
+            .expect("create sqlite test database")
+    }
+
+    async fn seed_user(database: &AnyPool) -> Uuid {
+        let id = Uuid::now_v7();
+        let now = unix_timestamp_string();
+        query(&prepare_sql(
+            DatabaseBackend::Sqlite,
+            "INSERT INTO users (id, email, password_hash, role, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?)",
+        ))
+        .bind(id.to_string())
+        .bind(format!("{id}@example.test"))
+        .bind("hash")
+        .bind("admin")
+        .bind(&now)
+        .bind(&now)
+        .execute(database)
+        .await
+        .expect("insert user");
+        id
+    }
+
+    async fn insert_model_route(database: &AnyPool, public_model: &str) {
+        let provider_id = Uuid::now_v7();
+        let route_id = Uuid::now_v7();
+        let now = unix_timestamp_string();
+        query(&prepare_sql(
+            DatabaseBackend::Sqlite,
+            "INSERT INTO provider_connections (
+                 id, name, provider_type, base_url, api_key_encrypted, enabled, created_at, updated_at
+             ) VALUES (?, ?, ?, ?, ?, 1, ?, ?)",
+        ))
+        .bind(provider_id.to_string())
+        .bind(format!("provider-{provider_id}"))
+        .bind("openai-compatible")
+        .bind("http://127.0.0.1:11434/v1")
+        .bind("encrypted")
+        .bind(&now)
+        .bind(&now)
+        .execute(database)
+        .await
+        .expect("insert provider");
+
+        query(&prepare_sql(
+            DatabaseBackend::Sqlite,
+            "INSERT INTO model_routes (
+                 id,
+                 provider_connection_id,
+                 public_model,
+                 upstream_model,
+                 max_tokens,
+                 pricing_input_per_1m_tokens,
+                 pricing_output_per_1m_tokens,
+                 enabled,
+                 created_at,
+                 updated_at
+             ) VALUES (?, ?, ?, ?, ?, 0, 0, 1, ?, ?)",
+        ))
+        .bind(route_id.to_string())
+        .bind(provider_id.to_string())
+        .bind(public_model)
+        .bind(public_model)
+        .bind(None::<i64>)
+        .bind(&now)
+        .bind(&now)
+        .execute(database)
+        .await
+        .expect("insert model route");
+    }
+
+    async fn insert_daemon_node(
+        database: &AnyPool,
+        models: Vec<&str>,
+        last_seen_at: i64,
+        disabled: i32,
+        health_status: &str,
+        metadata: Option<Value>,
+    ) {
+        let node_id = Uuid::now_v7();
+        let user_id = seed_user(database).await;
+        let now = unix_timestamp_string();
+        let model_ids = models
+            .into_iter()
+            .map(ToOwned::to_owned)
+            .collect::<Vec<_>>();
+        query(&prepare_sql(
+            DatabaseBackend::Sqlite,
+            "INSERT INTO daemon_nodes (
+                 id,
+                 host_user_id,
+                 label,
+                 hostname,
+                 token_hash,
+                 status,
+                 revoked,
+                 disabled,
+                 last_seen_at,
+                 provider_family,
+                 model_ids_json,
+                 max_concurrency,
+                 health_status,
+                 capability_metadata_json,
+                 created_at,
+                 updated_at
+             ) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        ))
+        .bind(node_id.to_string())
+        .bind(user_id.to_string())
+        .bind("private-gpu-node")
+        .bind("workstation.local")
+        .bind(format!("token-{node_id}"))
+        .bind(STATUS_ACTIVE)
+        .bind(disabled)
+        .bind(last_seen_at.to_string())
+        .bind("openai-compatible")
+        .bind(serde_json::to_string(&model_ids).expect("serialize model ids"))
+        .bind(4_i32)
+        .bind(health_status)
+        .bind(metadata.map(|value| value.to_string()))
+        .bind(&now)
+        .bind(&now)
+        .execute(database)
+        .await
+        .expect("insert daemon node");
+    }
 
     #[test]
     fn normalize_auth_mode_defaults_to_api_key() {
@@ -817,5 +1020,125 @@ mod tests {
             .expect("non-api auth config should be stored");
 
         assert!(normalized.contains("credential_ref"));
+    }
+
+    #[tokio::test]
+    async fn list_public_models_includes_live_daemon_capabilities_without_node_metadata() {
+        let database = sqlite_test_database().await;
+        let now = now_utc_epoch_seconds();
+
+        insert_daemon_node(
+            &database,
+            vec!["llama3.1", "qwen2.5-coder"],
+            now,
+            0,
+            HEALTH_STATUS_HEALTHY,
+            Some(json!({"local_provider_url": "http://127.0.0.1:11434/v1"})),
+        )
+        .await;
+
+        let models = list_public_models(&database, DatabaseBackend::Sqlite, 60)
+            .await
+            .expect("list public models");
+
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[0].id, "llama3.1");
+        assert_eq!(models[0].owned_by, "mizan-daemon");
+        assert_eq!(models[0].provider_type, "openai-compatible");
+        assert_eq!(models[0].upstream_model, "llama3.1");
+        assert_eq!(models[0].route_id, "daemon");
+        let serialized = serde_json::to_string(&models).expect("serialize models");
+        assert!(!serialized.contains("private-gpu-node"));
+        assert!(!serialized.contains("workstation.local"));
+        assert!(!serialized.contains("127.0.0.1:11434"));
+    }
+
+    #[tokio::test]
+    async fn list_public_models_filters_unavailable_daemon_nodes_and_deduplicates_routes() {
+        let database = sqlite_test_database().await;
+        let now = now_utc_epoch_seconds();
+        insert_model_route(&database, "route-backed").await;
+        insert_daemon_node(
+            &database,
+            vec!["route-backed", "daemon-only"],
+            now,
+            0,
+            HEALTH_STATUS_HEALTHY,
+            None,
+        )
+        .await;
+        insert_daemon_node(
+            &database,
+            vec!["stale-model"],
+            now - 120,
+            0,
+            HEALTH_STATUS_HEALTHY,
+            None,
+        )
+        .await;
+        insert_daemon_node(
+            &database,
+            vec!["disabled-model"],
+            now,
+            1,
+            HEALTH_STATUS_HEALTHY,
+            None,
+        )
+        .await;
+        insert_daemon_node(&database, vec!["sick-model"], now, 0, "degraded", None).await;
+
+        let models = list_public_models(&database, DatabaseBackend::Sqlite, 60)
+            .await
+            .expect("list public models");
+        let ids = models
+            .iter()
+            .map(|model| model.id.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(ids, vec!["daemon-only", "route-backed"]);
+    }
+
+    #[tokio::test]
+    async fn list_public_models_skips_daemon_nodes_with_invalid_model_capabilities() {
+        let database = sqlite_test_database().await;
+        let now = now_utc_epoch_seconds();
+
+        insert_daemon_node(
+            &database,
+            vec!["healthy-daemon-model"],
+            now,
+            0,
+            HEALTH_STATUS_HEALTHY,
+            None,
+        )
+        .await;
+        insert_daemon_node(
+            &database,
+            vec!["corrupt-daemon-model"],
+            now,
+            0,
+            HEALTH_STATUS_HEALTHY,
+            None,
+        )
+        .await;
+        query(&prepare_sql(
+            DatabaseBackend::Sqlite,
+            "UPDATE daemon_nodes SET model_ids_json = ? WHERE model_ids_json = ?",
+        ))
+        .bind("{not-json")
+        .bind("[\"corrupt-daemon-model\"]")
+        .execute(&database)
+        .await
+        .expect("corrupt daemon model ids");
+
+        let models = list_public_models(&database, DatabaseBackend::Sqlite, 60)
+            .await
+            .expect("list public models");
+        let ids = models
+            .iter()
+            .map(|model| model.id.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(ids, vec!["healthy-daemon-model"]);
     }
 }

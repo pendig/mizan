@@ -51,6 +51,54 @@ Set `DATABASE_URL=postgres://...` before running if you want to exercise the
 same flow against PostgreSQL. The API migration path is shared by SQLite and
 PostgreSQL through `sqlx::Any`.
 
+## Self-Serve Distributed Onboarding
+
+Once the API and at least one healthy `mizan-daemon` node are running, a normal
+user should be able to register, create a virtual API key, and discover
+daemon-backed models without host details leaking through `/v1/models`.
+
+```bash
+BASE_URL="${MIZAN_BASE_URL:-http://127.0.0.1:18180}"
+EMAIL="user-$(date +%s)@example.test"
+PASSWORD="change-me-distributed"
+
+curl -fsS -X POST "${BASE_URL}/auth/register" \
+  -H 'content-type: application/json' \
+  -d "{\"email\":\"${EMAIL}\",\"password\":\"${PASSWORD}\"}"
+
+SESSION_TOKEN="$(
+  curl -fsS -X POST "${BASE_URL}/auth/login" \
+    -H 'content-type: application/json' \
+    -d "{\"email\":\"${EMAIL}\",\"password\":\"${PASSWORD}\"}" \
+    | python3 -c 'import json,sys; print(json.load(sys.stdin)["access_token"])'
+)"
+
+API_KEY="$(
+  curl -fsS -X POST "${BASE_URL}/api-keys" \
+    -H "authorization: Bearer ${SESSION_TOKEN}" \
+    -H 'content-type: application/json' \
+    -d '{"label":"distributed-onboarding"}' \
+    | python3 -c 'import json,sys; print(json.load(sys.stdin)["key"])'
+)"
+
+curl -fsS "${BASE_URL}/v1/models" \
+  -H "authorization: Bearer ${API_KEY}" \
+  | python3 -m json.tool
+```
+
+Run the same flow as a repeatable smoke check:
+
+```bash
+MIZAN_BASE_URL="${BASE_URL}" \
+MIZAN_DISTRIBUTED_MODEL="llama3.1" \
+scripts/distributed-onboarding-smoke.sh
+```
+
+Set `MIZAN_DISTRIBUTED_RUN_CHAT=1` to include a daemon-backed
+`/v1/chat/completions` call after the distributed dispatch lifecycle is enabled.
+Until then, the smoke script validates self-serve onboarding and model
+visibility only.
+
 ## Expected Output
 
 The run should end with:
