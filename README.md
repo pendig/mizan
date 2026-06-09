@@ -180,6 +180,15 @@ MIZAN_REDIS_URL=redis://127.0.0.1:6379 scripts/limit-smoke.sh
 REDIS_URL=redis://127.0.0.1:6379/ scripts/alpha-smoke.sh
 ```
 
+Run the self-serve user onboarding smoke against a running API:
+
+```sh
+scripts/user-onboarding-smoke.sh
+```
+
+Copy-paste registration, login, API key, model listing, and gateway examples are
+in [User API Key Onboarding](docs/USER_ONBOARDING.md).
+
 ## License
 
 Apache-2.0. See [LICENSE](LICENSE).
