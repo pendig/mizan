@@ -1,6 +1,7 @@
 use std::convert::Infallible;
 use std::time::Instant;
 
+use crate::dispatch::{DispatchJobInput, DispatchJobResult, dispatch_to_daemon_node};
 use crate::logging::{RequestLogInput, error_code_from_app_error, record_request_log};
 use axum::{
     Extension, Json,
@@ -34,6 +35,7 @@ use uuid::Uuid;
 use crate::AppState;
 use crate::auth::ApiKeyIdentity;
 use crate::billing;
+use crate::daemon_nodes::select_eligible_daemon_node;
 use crate::metrics::{GatewayObservation, MetricsRegistry};
 use crate::utils::{decrypt_provider_api_key, from_app_error, now_utc_epoch_seconds, prepare_sql};
 
@@ -247,6 +249,20 @@ async fn chat_completions_impl(
     .await
     {
         Ok(route) => route,
+        Err(error) if is_model_route_not_found(&error) => {
+            return handle_daemon_chat_completion(
+                state,
+                identity,
+                context,
+                unresolved_completion_log,
+                request_started_at,
+                request_id,
+                public_model.to_owned(),
+                payload,
+                spec,
+            )
+            .await;
+        }
         Err(error) => {
             let status = app_error_status_code(&error);
             let error_code = error_code_from_app_error(&error);
@@ -674,6 +690,371 @@ async fn chat_completions_impl(
     Ok(response)
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn handle_daemon_chat_completion(
+    state: AppState,
+    identity: ApiKeyIdentity,
+    mut context: RequestContext,
+    completion_log: GatewayCompletionLog,
+    request_started_at: Instant,
+    request_id: Uuid,
+    public_model: String,
+    payload: ChatCompletionsRequest,
+    spec: GatewayRequestSpec,
+) -> GatewayHttpResult {
+    if payload.stream {
+        let app_error = AppError::invalid_config(
+            spec.stream_field,
+            "stream is not supported for daemon-backed models yet",
+        );
+        let status = app_error_status_code(&app_error);
+        let error_code = error_code_from_app_error(&app_error);
+        record_gateway_request_completion(&completion_log, status, Some(&error_code)).await;
+        return Ok(build_error_response(
+            &context,
+            status,
+            Json(ErrorEnvelope::from(&app_error)),
+        ));
+    }
+
+    let node = match select_eligible_daemon_node(
+        &state.database,
+        state.database_backend(),
+        &public_model,
+        i64::from(state.config.daemon_stale_seconds),
+    )
+    .instrument(info_span!(
+        "daemon_node_selection",
+        request_id = %request_id,
+        trace_id = %context.trace_id,
+        model = %public_model,
+    ))
+    .await
+    {
+        Ok(Some(node)) => node,
+        Ok(None) => {
+            let app_error =
+                AppError::invalid_config(spec.model_field, "model not found or disabled");
+            let status = app_error_status_code(&app_error);
+            let error_code = error_code_from_app_error(&app_error);
+            record_gateway_request_completion(&completion_log, status, Some(&error_code)).await;
+            return Ok(build_error_response(
+                &context,
+                status,
+                Json(ErrorEnvelope::from(&app_error)),
+            ));
+        }
+        Err(error) => {
+            let status = app_error_status_code(&error);
+            let error_code = error_code_from_app_error(&error);
+            record_gateway_request_completion(&completion_log, status, Some(&error_code)).await;
+            let (_, body) = from_app_error(error);
+            return Ok(build_error_response(&context, status, body));
+        }
+    };
+
+    context = RequestContextBuilder::default()
+        .user_id(identity.user_id)
+        .api_key_id(identity.api_key_id)
+        .provider(node.provider_family.clone())
+        .request_id(request_id)
+        .trace_id(context.trace_id)
+        .route(public_model.clone())
+        .method("POST")
+        .path(spec.path)
+        .model(node.model_id.clone())
+        .streaming(false)
+        .build();
+    let completion_log = GatewayCompletionLog::new(
+        &state.database,
+        state.database_backend(),
+        &context,
+        request_started_at,
+    )
+    .with_route_alias(public_model.clone())
+    .with_provider_alias("mizan-daemon");
+
+    let effective_max_tokens =
+        match resolve_effective_max_tokens(payload.max_tokens, None, spec.max_tokens_field) {
+            Ok(max_tokens) => max_tokens,
+            Err(error) => {
+                let status = app_error_status_code(&error);
+                let error_code = error_code_from_app_error(&error);
+                record_gateway_request_completion(&completion_log, status, Some(&error_code)).await;
+                let (_, body) = from_app_error(error);
+                return Ok(build_error_response(&context, status, body));
+            }
+        };
+
+    let upstream_request = ChatRequest {
+        model: node.model_id.clone(),
+        messages: payload.messages.clone(),
+        stream: false,
+        max_tokens: effective_max_tokens,
+    };
+    let request_messages = upstream_request.messages.clone();
+    let route_price = RoutePrice {
+        input_microcredits_per_1m_tokens: 0,
+        output_microcredits_per_1m_tokens: 0,
+    };
+    let admission_usage = estimate_admission_usage(&request_messages, effective_max_tokens);
+    let prompt_only_usage = billing::estimate_usage(&request_messages, "");
+
+    if let Err(error) = billing::ensure_sufficient_credit(
+        &state.database,
+        state.database_backend(),
+        identity.user_id,
+        admission_usage,
+        route_price,
+    )
+    .await
+    {
+        let status = app_error_status_code(&error);
+        let error_code = error_code_from_app_error(&error);
+        record_gateway_request_completion(&completion_log, status, Some(&error_code)).await;
+        let (status, body) = from_app_error(error);
+        observe_gateway_metrics(
+            &state.metrics,
+            &context,
+            &public_model,
+            prompt_only_usage,
+            status,
+            request_started_at.elapsed().as_millis() as u64,
+            route_price,
+        );
+        return Ok(build_error_response(&context, status, body));
+    }
+
+    let limit_lease = match acquire_runtime_limits(
+        &state,
+        vec![
+            LimitScope::ApiKey(identity.api_key_id),
+            LimitScope::User(identity.user_id),
+        ],
+        admission_usage.total_tokens,
+    )
+    .await
+    {
+        Ok(lease) => lease,
+        Err(error) => {
+            let status = app_error_status_code(&error);
+            let error_code = error_code_from_app_error(&error);
+            record_gateway_request_completion(&completion_log, status, Some(&error_code)).await;
+            let (_, body) = from_app_error(error);
+            observe_gateway_metrics(
+                &state.metrics,
+                &context,
+                &public_model,
+                admission_usage,
+                status,
+                request_started_at.elapsed().as_millis() as u64,
+                route_price,
+            );
+            return Ok(build_error_response(&context, status, body));
+        }
+    };
+
+    let dispatch_result = dispatch_to_daemon_node(
+        &state.database,
+        state.database_backend(),
+        &node,
+        DispatchJobInput {
+            request_id,
+            node_id: node.id,
+            user_id: Some(identity.user_id),
+            api_key_id: Some(identity.api_key_id),
+            model: public_model.clone(),
+            request: upstream_request,
+            timeout_seconds: state.config.limit_lease_seconds.clamp(1, 30),
+        },
+    )
+    .instrument(info_span!(
+        "daemon_dispatch",
+        request_id = %context.request_id,
+        trace_id = %context.trace_id,
+        route = %public_model,
+        node_id = %node.id,
+    ))
+    .await;
+
+    let response = match dispatch_result {
+        Ok(DispatchJobResult::Succeeded(upstream_response)) => {
+            let usage = upstream_response.usage.unwrap_or_else(|| {
+                billing::estimate_usage(&request_messages, &upstream_response.content)
+            });
+            let latency_ms = request_started_at.elapsed().as_millis() as u64;
+            if let Err(error) = billing::record_usage(
+                &state.database,
+                state.database_backend(),
+                billing::BillingInput {
+                    request_id,
+                    user_id: identity.user_id,
+                    api_key_id: Some(identity.api_key_id),
+                    provider_id: None,
+                    route_id: None,
+                    model: public_model.clone(),
+                    usage,
+                    status_code: StatusCode::OK.as_u16(),
+                    latency_ms,
+                    route_price,
+                },
+            )
+            .await
+            {
+                let status = app_error_status_code(&error);
+                let error_code = error_code_from_app_error(&error);
+                let (_, body) = from_app_error(error);
+                observe_gateway_metrics(
+                    &state.metrics,
+                    &context,
+                    &public_model,
+                    usage,
+                    status,
+                    latency_ms,
+                    route_price,
+                );
+                record_gateway_request_completion(
+                    &completion_log,
+                    status,
+                    Some(error_code.as_str()),
+                )
+                .await;
+                release_limit_lease(Some(limit_lease));
+                return Ok(build_error_response(&context, status, body));
+            }
+
+            observe_gateway_metrics(
+                &state.metrics,
+                &context,
+                &public_model,
+                usage,
+                StatusCode::OK,
+                latency_ms,
+                route_price,
+            );
+            record_gateway_request_completion(&completion_log, StatusCode::OK, None).await;
+            json_chat_completion_response(
+                &format!("chatcmpl-{}", Uuid::now_v7()),
+                public_model.clone(),
+                upstream_response,
+                &context,
+            )
+        }
+        Ok(DispatchJobResult::Failed {
+            error_code,
+            error_message,
+        }) => {
+            let error = AppError::provider(format!(
+                "daemon dispatch failed code={} message={}",
+                error_code.unwrap_or_else(|| "daemon_error".to_owned()),
+                redact_for_logs(error_message)
+            ));
+            daemon_error_response(
+                &state,
+                &context,
+                &completion_log,
+                request_started_at,
+                request_id,
+                identity.clone(),
+                &public_model,
+                &request_messages,
+                route_price,
+                error,
+            )
+            .await
+        }
+        Ok(DispatchJobResult::TimedOut) => {
+            let error = AppError::provider("daemon dispatch timed out");
+            daemon_error_response(
+                &state,
+                &context,
+                &completion_log,
+                request_started_at,
+                request_id,
+                identity.clone(),
+                &public_model,
+                &request_messages,
+                route_price,
+                error,
+            )
+            .await
+        }
+        Err(error) => {
+            let normalized_error = normalize_provider_error(error, &context, public_model.clone());
+            daemon_error_response(
+                &state,
+                &context,
+                &completion_log,
+                request_started_at,
+                request_id,
+                identity.clone(),
+                &public_model,
+                &request_messages,
+                route_price,
+                normalized_error,
+            )
+            .await
+        }
+    };
+
+    release_limit_lease(Some(limit_lease));
+    Ok(response)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn daemon_error_response(
+    state: &AppState,
+    context: &RequestContext,
+    completion_log: &GatewayCompletionLog,
+    request_started_at: Instant,
+    request_id: Uuid,
+    identity: ApiKeyIdentity,
+    public_model: &str,
+    request_messages: &[ChatMessage],
+    route_price: RoutePrice,
+    error: AppError,
+) -> Response {
+    let error_code = error_code_from_app_error(&error);
+    let (status, body) = from_app_error(error);
+    let latency_ms = request_started_at.elapsed().as_millis() as u64;
+    let usage = billing::estimate_usage(request_messages, "");
+    if let Err(error) = billing::record_usage(
+        &state.database,
+        state.database_backend(),
+        billing::BillingInput {
+            request_id,
+            user_id: identity.user_id,
+            api_key_id: Some(identity.api_key_id),
+            provider_id: None,
+            route_id: None,
+            model: public_model.to_owned(),
+            usage,
+            status_code: status.as_u16(),
+            latency_ms,
+            route_price,
+        },
+    )
+    .await
+    {
+        warn!(
+            request_id = %request_id,
+            error = %error,
+            "failed to persist daemon dispatch error usage"
+        );
+    }
+    observe_gateway_metrics(
+        &state.metrics,
+        context,
+        public_model,
+        usage,
+        status,
+        latency_ms,
+        route_price,
+    );
+    record_gateway_request_completion(completion_log, status, Some(error_code.as_str())).await;
+    build_error_response(context, status, body)
+}
+
 #[derive(Debug, Clone)]
 struct GatewayCompletionLog {
     database: AnyPool,
@@ -938,6 +1319,15 @@ fn app_error_status_code(error: &AppError) -> StatusCode {
             StatusCode::INTERNAL_SERVER_ERROR
         }
     }
+}
+
+fn is_model_route_not_found(error: &AppError) -> bool {
+    matches!(
+        error,
+        AppError::InvalidConfig { key, message }
+            if (*key == CHAT_COMPLETIONS_MODEL_FIELD || *key == RESPONSES_MODEL_FIELD)
+                && message == "model not found or disabled"
+    )
 }
 
 fn json_chat_completion_response(
