@@ -140,6 +140,7 @@ mod tests {
             "request_logs",
             "admin_audit_logs",
             "daemon_nodes",
+            "dispatch_jobs",
         ];
 
         let expected_indexes = [
@@ -166,6 +167,9 @@ mod tests {
             "idx_daemon_nodes_token_hash",
             "idx_daemon_nodes_disabled",
             "idx_daemon_nodes_health_status",
+            "idx_dispatch_jobs_node_status",
+            "idx_dispatch_jobs_request_id",
+            "idx_dispatch_jobs_status_timeout",
         ];
 
         for expected in expected_tables {

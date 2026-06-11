@@ -30,6 +30,7 @@ const AUDIT_ACTION_DELETE_MODEL_ROUTE: &str = "model_route_deleted";
 const AUDIT_ENTITY_PROVIDER: &str = "provider_connection";
 const AUDIT_ENTITY_MODEL_ROUTE: &str = "model_route";
 const AUTH_MODE_API_KEY: &str = "api_key";
+const AUTH_MODE_DAEMON: &str = "daemon";
 const AUTH_MODE_SUBSCRIPTION_CLI: &str = "subscription_cli";
 const AUTH_MODE_BROWSER_SESSION: &str = "browser_session";
 
@@ -172,11 +173,12 @@ fn normalize_auth_mode(raw_mode: Option<&str>) -> Result<&'static str, AppError>
 
     match mode {
         AUTH_MODE_API_KEY => Ok(AUTH_MODE_API_KEY),
+        AUTH_MODE_DAEMON => Ok(AUTH_MODE_DAEMON),
         AUTH_MODE_SUBSCRIPTION_CLI => Ok(AUTH_MODE_SUBSCRIPTION_CLI),
         AUTH_MODE_BROWSER_SESSION => Ok(AUTH_MODE_BROWSER_SESSION),
         _ => Err(AppError::invalid_config(
             "provider_connection.auth_mode",
-            "auth_mode must be api_key, subscription_cli, or browser_session",
+            "auth_mode must be api_key, daemon, subscription_cli, or browser_session",
         )),
     }
 }
@@ -190,10 +192,7 @@ fn normalize_auth_config(
     }
 
     let Some(config) = raw_config else {
-        return Err(AppError::invalid_config(
-            "provider_connection.auth_config_json",
-            "auth_config_json is required for non-api provider auth modes",
-        ));
+        return Ok(None);
     };
 
     let Some(config_object) = config.as_object() else {
@@ -453,20 +452,18 @@ pub async fn create_provider_connection(
     let id = Uuid::now_v7();
     let now = unix_timestamp_string();
     let enabled = payload.enabled.unwrap_or(true);
-    let provider_secret_key = state.config.provider_secret_key.as_deref().ok_or_else(|| {
-        from_app_error(AppError::invalid_config(
-            "MIZAN_PROVIDER_SECRET_KEY",
-            "set MIZAN_PROVIDER_SECRET_KEY before creating provider connections",
-        ))
-    })?;
-    let secret_material = if auth_mode == AUTH_MODE_API_KEY {
-        secret
+    let encrypted_api_key = if auth_mode == AUTH_MODE_API_KEY {
+        let provider_secret_key = state.config.provider_secret_key.as_deref().ok_or_else(|| {
+            from_app_error(AppError::invalid_config(
+                "MIZAN_PROVIDER_SECRET_KEY",
+                "set MIZAN_PROVIDER_SECRET_KEY before creating api_key provider connections",
+            ))
+        })?;
+        encrypt_provider_api_key(provider_secret_key, &id.to_string(), secret)
+            .map_err(from_app_error)?
     } else {
-        ""
+        String::new()
     };
-    let encrypted_api_key =
-        encrypt_provider_api_key(provider_secret_key, &id.to_string(), secret_material)
-            .map_err(from_app_error)?;
 
     let sql = prepare_sql(
         state.database_backend(),

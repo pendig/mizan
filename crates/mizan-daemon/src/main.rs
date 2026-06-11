@@ -70,6 +70,7 @@ async fn run(args: ConfigArgs) -> AppResult<()> {
     init_tracing("mizan_daemon=info,mizan_core=info")?;
     let token = read_daemon_token(&config)?;
     let heartbeat_url = control_plane_endpoint(&config.control_plane_url, "/daemon/heartbeat");
+    let next_job_url = control_plane_endpoint(&config.control_plane_url, "/daemon/jobs/next");
     let client = daemon_http_client()?;
 
     info!(
@@ -99,11 +100,194 @@ async fn run(args: ConfigArgs) -> AppResult<()> {
                 warn!(error = %error, "daemon heartbeat failed");
             }
         }
+        if let Err(error) = drain_dispatch_jobs(&client, &next_job_url, &token, &config).await {
+            warn!(error = %error, "daemon dispatch polling failed");
+        }
         sleep(Duration::from_secs(u64::from(
             config.heartbeat_interval_seconds.max(1),
         )))
         .await;
     }
+}
+
+async fn drain_dispatch_jobs(
+    client: &reqwest::Client,
+    next_job_url: &str,
+    token: &str,
+    config: &DaemonConfig,
+) -> AppResult<()> {
+    loop {
+        let next = request_next_job(client, next_job_url, token).await?;
+        let Some(job) = next.job else {
+            return Ok(());
+        };
+
+        if let Err(error) = execute_dispatch_job(client, token, config, job).await {
+            warn!(error = %error, "dispatch job execution failed");
+        }
+    }
+}
+
+async fn request_next_job(
+    client: &reqwest::Client,
+    next_job_url: &str,
+    token: &str,
+) -> AppResult<DaemonNextJobResponse> {
+    let response = client
+        .post(next_job_url)
+        .bearer_auth(token)
+        .send()
+        .await
+        .map_err(|error| AppError::infrastructure(format!("daemon job poll failed: {error}")))?;
+
+    let status = response.status();
+    if !status.is_success() {
+        return Err(AppError::infrastructure(format!(
+            "daemon job poll rejected by control plane with status {status}"
+        )));
+    }
+
+    response.json().await.map_err(|error| {
+        AppError::infrastructure(format!("invalid daemon next job response: {error}"))
+    })
+}
+
+async fn execute_dispatch_job(
+    client: &reqwest::Client,
+    token: &str,
+    config: &DaemonConfig,
+    job: DispatchJob,
+) -> AppResult<()> {
+    let local_response = client
+        .post(local_chat_completion_url(&config.local_provider_url))
+        .json(&job.request)
+        .send()
+        .await;
+
+    match local_response {
+        Ok(response) if response.status().is_success() => {
+            let body: OpenAiChatCompletionResponse = response.json().await.map_err(|error| {
+                AppError::infrastructure(format!("invalid local provider response: {error}"))
+            })?;
+            complete_dispatch_job(client, token, config, &job, body).await
+        }
+        Ok(response) => {
+            let status = response.status();
+            let body = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "<failed to read local provider body>".to_owned());
+            fail_dispatch_job(
+                client,
+                token,
+                config,
+                job.id,
+                "local_provider_error",
+                &format!("local provider returned status={status} body={}", redact_for_log_body(body)),
+            )
+            .await
+        }
+        Err(error) => {
+            fail_dispatch_job(
+                client,
+                token,
+                config,
+                job.id,
+                "local_provider_transport",
+                &format!("local provider request failed: {error}"),
+            )
+            .await
+        }
+    }
+}
+
+async fn complete_dispatch_job(
+    client: &reqwest::Client,
+    token: &str,
+    config: &DaemonConfig,
+    job: &DispatchJob,
+    body: OpenAiChatCompletionResponse,
+) -> AppResult<()> {
+    let content = body
+        .choices
+        .first()
+        .map(|choice| choice.message.content.clone())
+        .unwrap_or_default();
+    let response = DispatchCompleteRequest {
+        response: ChatResponse {
+            provider: config.provider_family.clone(),
+            model: body.model.unwrap_or_else(|| job.request.model.clone()),
+            content,
+            usage: body.usage.map(|usage| TokenUsage {
+                prompt_tokens: usage.prompt_tokens,
+                completion_tokens: usage.completion_tokens,
+                total_tokens: usage.total_tokens,
+                estimated: false,
+            }),
+        },
+    };
+    let complete_url =
+        control_plane_endpoint(&config.control_plane_url, &format!("/daemon/jobs/{}/complete", job.id));
+    let result = client
+        .post(complete_url)
+        .bearer_auth(token)
+        .json(&response)
+        .send()
+        .await
+        .map_err(|error| AppError::infrastructure(format!("dispatch completion failed: {error}")))?;
+
+    if !result.status().is_success() {
+        return Err(AppError::infrastructure(format!(
+            "dispatch completion rejected with status {}",
+            result.status()
+        )));
+    }
+
+    Ok(())
+}
+
+async fn fail_dispatch_job(
+    client: &reqwest::Client,
+    token: &str,
+    config: &DaemonConfig,
+    job_id: String,
+    error_code: &str,
+    error_message: &str,
+) -> AppResult<()> {
+    let fail_url =
+        control_plane_endpoint(&config.control_plane_url, &format!("/daemon/jobs/{job_id}/fail"));
+    let result = client
+        .post(fail_url)
+        .bearer_auth(token)
+        .json(&DispatchFailRequest {
+            error_code,
+            error_message,
+        })
+        .send()
+        .await
+        .map_err(|error| AppError::infrastructure(format!("dispatch failure report failed: {error}")))?;
+
+    if !result.status().is_success() {
+        return Err(AppError::infrastructure(format!(
+            "dispatch failure report rejected with status {}",
+            result.status()
+        )));
+    }
+
+    Ok(())
+}
+
+fn local_chat_completion_url(base_url: &str) -> String {
+    let base_url = base_url.trim_end_matches('/');
+    if base_url.ends_with("/v1") {
+        format!("{base_url}/chat/completions")
+    } else {
+        format!("{base_url}/v1/chat/completions")
+    }
+}
+
+fn redact_for_log_body(body: String) -> String {
+    mizan_core::redact_for_logs(body)
 }
 
 async fn register(args: ConfigArgs) -> AppResult<()> {
@@ -404,6 +588,84 @@ struct DaemonHeartbeatResponse {
     last_seen_at: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct DaemonNextJobResponse {
+    job: Option<DispatchJob>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DispatchJob {
+    id: String,
+    request: ChatRequest,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ChatRequest {
+    model: String,
+    messages: Vec<ChatMessage>,
+    #[serde(default)]
+    stream: bool,
+    #[serde(default)]
+    max_tokens: Option<u64>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ChatMessage {
+    role: String,
+    content: String,
+}
+
+#[derive(Debug, Serialize)]
+struct DispatchCompleteRequest {
+    response: ChatResponse,
+}
+
+#[derive(Debug, Serialize)]
+struct DispatchFailRequest<'a> {
+    error_code: &'a str,
+    error_message: &'a str,
+}
+
+#[derive(Debug, Serialize)]
+struct ChatResponse {
+    provider: String,
+    model: String,
+    content: String,
+    usage: Option<TokenUsage>,
+}
+
+#[derive(Debug, Serialize)]
+struct TokenUsage {
+    prompt_tokens: u64,
+    completion_tokens: u64,
+    total_tokens: u64,
+    estimated: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiChatCompletionResponse {
+    model: Option<String>,
+    choices: Vec<OpenAiChatCompletionChoice>,
+    usage: Option<OpenAiUsage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiChatCompletionChoice {
+    message: OpenAiChatCompletionMessage,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiChatCompletionMessage {
+    content: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiUsage {
+    prompt_tokens: u64,
+    completion_tokens: u64,
+    total_tokens: u64,
+}
+
 fn required_field<T>(value: Option<T>, key: &'static str) -> AppResult<T> {
     value.ok_or_else(|| AppError::invalid_config(key, "is required"))
 }
@@ -539,6 +801,18 @@ heartbeat_interval_seconds = 15
         assert_eq!(
             control_plane_endpoint("https://mizan.example.test/", "/daemon/register"),
             "https://mizan.example.test/daemon/register"
+        );
+    }
+
+    #[test]
+    fn builds_local_chat_completion_url() {
+        assert_eq!(
+            local_chat_completion_url("http://127.0.0.1:11434"),
+            "http://127.0.0.1:11434/v1/chat/completions"
+        );
+        assert_eq!(
+            local_chat_completion_url("http://127.0.0.1:11434/v1/"),
+            "http://127.0.0.1:11434/v1/chat/completions"
         );
     }
 

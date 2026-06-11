@@ -34,6 +34,8 @@ use uuid::Uuid;
 use crate::AppState;
 use crate::auth::ApiKeyIdentity;
 use crate::billing;
+use crate::daemon_nodes;
+use crate::dispatch;
 use crate::metrics::{GatewayObservation, MetricsRegistry};
 use crate::utils::{decrypt_provider_api_key, from_app_error, now_utc_epoch_seconds, prepare_sql};
 
@@ -48,6 +50,7 @@ const RESPONSES_MODEL_FIELD: &str = "responses.model";
 const RESPONSES_STREAM_FIELD: &str = "responses.stream";
 const RESPONSES_MAX_TOKENS_FIELD: &str = "responses.max_tokens";
 const PROVIDER_AUTH_MODE_API_KEY: &str = "api_key";
+const PROVIDER_AUTH_MODE_DAEMON: &str = "daemon";
 
 #[derive(Clone, Copy, Debug)]
 struct GatewayRequestSpec {
@@ -139,8 +142,9 @@ struct ResolvedModelRoute {
     provider_connection_id: Uuid,
     upstream_model: String,
     provider_type: String,
+    provider_auth_mode: String,
     provider_base_url: String,
-    provider_api_key: String,
+    provider_api_key: Option<String>,
     max_tokens: Option<u64>,
     input_price_per_1m_tokens: i64,
     output_price_per_1m_tokens: i64,
@@ -321,7 +325,9 @@ async fn chat_completions_impl(
 
     let completion_id = format!("chatcmpl-{}", Uuid::now_v7());
 
-    let provider_name = if route.provider_type.eq_ignore_ascii_case("openai") {
+    let provider_name = if route.provider_auth_mode == PROVIDER_AUTH_MODE_DAEMON {
+        "mizan-daemon".to_owned()
+    } else if route.provider_type.eq_ignore_ascii_case("openai") {
         "openai".to_owned()
     } else {
         "openai-compatible".to_owned()
@@ -330,11 +336,6 @@ async fn chat_completions_impl(
         .clone()
         .with_provider_alias(provider_name.clone());
     let route_price = route.route_price();
-    let provider = OpenAiCompatibleProvider::new(
-        provider_name.clone(),
-        route.provider_base_url,
-        route.provider_api_key.clone(),
-    );
     let admission_usage = estimate_admission_usage(&request_messages, effective_max_tokens);
     let prompt_only_usage = billing::estimate_usage(&request_messages, "");
     if let Err(error) = billing::ensure_sufficient_credit(
@@ -436,7 +437,47 @@ async fn chat_completions_impl(
         }
     };
 
+    if payload.stream && route.provider_auth_mode == PROVIDER_AUTH_MODE_DAEMON {
+        let error = AppError::invalid_config(
+            spec.stream_field,
+            "streaming daemon dispatch is not supported yet",
+        );
+        let status = app_error_status_code(&error);
+        let error_code = error_code_from_app_error(&error);
+        let latency_ms = request_started_at.elapsed().as_millis() as u64;
+        record_gateway_request_completion(&completion_log, status, Some(&error_code)).await;
+        observe_gateway_metrics(
+            &state.metrics,
+            &context,
+            public_model,
+            admission_usage,
+            status,
+            latency_ms,
+            route_price,
+        );
+        release_limit_lease(Some(limit_lease));
+        let (_, body) = from_app_error(error);
+        return Ok(build_error_response(&context, status, body));
+    }
+
     let response = if payload.stream {
+        let Some(provider_api_key) = route.provider_api_key.as_ref() else {
+            let error = AppError::invalid_config(
+                "provider_connection.api_key",
+                "provider api key is missing",
+            );
+            let status = app_error_status_code(&error);
+            let error_code = error_code_from_app_error(&error);
+            record_gateway_request_completion(&completion_log, status, Some(&error_code)).await;
+            release_limit_lease(Some(limit_lease));
+            let (_, body) = from_app_error(error);
+            return Ok(build_error_response(&context, status, body));
+        };
+        let provider = OpenAiCompatibleProvider::new(
+            provider_name.clone(),
+            route.provider_base_url.clone(),
+            provider_api_key.clone(),
+        );
         let billing_context = StreamBillingContext {
             request_started_at,
             database: state.database.clone(),
@@ -531,18 +572,15 @@ async fn chat_completions_impl(
             billing_context,
         )
     } else {
-        let upstream_response = match state
-            .gateway
-            .chat_completions(&context, &provider, upstream_request)
-            .instrument(info_span!(
-                "provider_call",
-                request_id = %context.request_id,
-                trace_id = %context.trace_id,
-                route = %public_model,
-                provider = %context.provider.clone().unwrap_or_default(),
-                model = %context.model.clone().unwrap_or_default(),
-            ))
-            .await
+        let upstream_response = match execute_non_streaming_request(
+            &state,
+            &context,
+            &route,
+            &provider_name,
+            public_model,
+            upstream_request,
+        )
+        .await
         {
             Ok(upstream_response) => upstream_response,
             Err(error) => {
@@ -672,6 +710,113 @@ async fn chat_completions_impl(
     };
 
     Ok(response)
+}
+
+async fn execute_non_streaming_request(
+    state: &AppState,
+    context: &RequestContext,
+    route: &ResolvedModelRoute,
+    provider_name: &str,
+    public_model: &str,
+    upstream_request: ChatRequest,
+) -> Result<ChatResponse, AppError> {
+    if route.provider_auth_mode == PROVIDER_AUTH_MODE_DAEMON {
+        return execute_daemon_dispatch(state, context, route, public_model, upstream_request).await;
+    }
+
+    let provider_api_key = route.provider_api_key.as_ref().ok_or_else(|| {
+        AppError::invalid_config("provider_connection.api_key", "provider api key is missing")
+    })?;
+    let provider = OpenAiCompatibleProvider::new(
+        provider_name.to_owned(),
+        route.provider_base_url.clone(),
+        provider_api_key.clone(),
+    );
+
+    state
+        .gateway
+        .chat_completions(context, &provider, upstream_request)
+        .instrument(info_span!(
+            "provider_call",
+            request_id = %context.request_id,
+            trace_id = %context.trace_id,
+            route = %public_model,
+            provider = %context.provider.clone().unwrap_or_default(),
+            model = %context.model.clone().unwrap_or_default(),
+        ))
+        .await
+}
+
+async fn execute_daemon_dispatch(
+    state: &AppState,
+    context: &RequestContext,
+    route: &ResolvedModelRoute,
+    public_model: &str,
+    upstream_request: ChatRequest,
+) -> Result<ChatResponse, AppError> {
+    let node = daemon_nodes::select_eligible_daemon_node(
+        &state.database,
+        state.database_backend(),
+        &route.upstream_model,
+        i64::from(state.config.daemon_stale_seconds),
+    )
+    .instrument(info_span!(
+        "daemon_select",
+        request_id = %context.request_id,
+        trace_id = %context.trace_id,
+        route = %public_model,
+        model = %route.upstream_model,
+    ))
+    .await?
+    .ok_or_else(|| AppError::provider("no eligible live daemon node for model"))?;
+
+    let active_count = dispatch::active_dispatch_count_for_node(
+        &state.database,
+        state.database_backend(),
+        node.id,
+    )
+    .await?;
+    if active_count >= i64::from(node.max_concurrency) {
+        return Err(AppError::LimitExceeded(format!(
+            "daemon node concurrency exceeded for {}",
+            node.id
+        )));
+    }
+
+    let timeout_seconds = u64::from(state.config.limit_lease_seconds.max(1));
+    let dispatch_id = dispatch::create_dispatch_job(
+        &state.database,
+        state.database_backend(),
+        context.request_id,
+        node.id,
+        &route.upstream_model,
+        &upstream_request,
+        timeout_seconds,
+    )
+    .instrument(info_span!(
+        "daemon_dispatch_create",
+        request_id = %context.request_id,
+        trace_id = %context.trace_id,
+        route = %public_model,
+        node_id = %node.id,
+    ))
+    .await?;
+
+    dispatch::wait_for_dispatch_result(
+        &state.database,
+        state.database_backend(),
+        dispatch_id,
+        timeout_seconds,
+    )
+    .instrument(info_span!(
+        "daemon_dispatch_wait",
+        request_id = %context.request_id,
+        trace_id = %context.trace_id,
+        route = %public_model,
+        node_id = %node.id,
+        dispatch_id = %dispatch_id,
+    ))
+    .await
 }
 
 #[derive(Debug, Clone)]
@@ -1397,23 +1542,29 @@ async fn resolve_model_route(
             "stored provider connection id for route is invalid: {error}"
         ))
     })?;
-    if provider_auth_mode != PROVIDER_AUTH_MODE_API_KEY {
+    if provider_auth_mode != PROVIDER_AUTH_MODE_API_KEY
+        && provider_auth_mode != PROVIDER_AUTH_MODE_DAEMON
+    {
         return Err(AppError::invalid_config(
             "provider_connection.auth_mode",
             format!("provider auth mode `{provider_auth_mode}` is registered but not runnable yet"),
         ));
     }
-    let provider_secret_key = provider_secret_key.ok_or_else(|| {
-        AppError::invalid_config(
-            "MIZAN_PROVIDER_SECRET_KEY",
-            "set MIZAN_PROVIDER_SECRET_KEY before resolving model routes",
-        )
-    })?;
-    let provider_api_key = decrypt_provider_api_key(
-        provider_secret_key,
-        &provider_connection_id.to_string(),
-        &encrypted_api_key,
-    )?;
+    let provider_api_key = if provider_auth_mode == PROVIDER_AUTH_MODE_API_KEY {
+        let provider_secret_key = provider_secret_key.ok_or_else(|| {
+            AppError::invalid_config(
+                "MIZAN_PROVIDER_SECRET_KEY",
+                "set MIZAN_PROVIDER_SECRET_KEY before resolving model routes",
+            )
+        })?;
+        Some(decrypt_provider_api_key(
+            provider_secret_key,
+            &provider_connection_id.to_string(),
+            &encrypted_api_key,
+        )?)
+    } else {
+        None
+    };
     let max_tokens = max_tokens
         .map(|value| {
             u64::try_from(value).map_err(|_| {
@@ -1427,6 +1578,7 @@ async fn resolve_model_route(
         provider_connection_id,
         upstream_model,
         provider_type: provider_type.trim().to_string(),
+        provider_auth_mode,
         provider_base_url,
         provider_api_key,
         max_tokens,

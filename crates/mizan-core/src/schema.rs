@@ -14,6 +14,7 @@ pub mod tables {
     pub const REQUEST_LOGS: &str = "request_logs";
     pub const ADMIN_AUDIT_LOGS: &str = "admin_audit_logs";
     pub const DAEMON_NODES: &str = "daemon_nodes";
+    pub const DISPATCH_JOBS: &str = "dispatch_jobs";
 }
 
 pub fn bool_to_i64(value: bool) -> i64 {
@@ -166,6 +167,19 @@ pub struct DaemonNodeRecord {
     pub status: String,
     pub revoked: bool,
     pub last_seen_at: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DispatchJobRecord {
+    pub id: Uuid,
+    pub request_id: Uuid,
+    pub node_id: Uuid,
+    pub model: String,
+    pub status: String,
+    pub error_code: Option<String>,
+    pub latency_ms: Option<i64>,
     pub created_at: String,
     pub updated_at: String,
 }

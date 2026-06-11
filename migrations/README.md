@@ -24,3 +24,5 @@ Current versions:
 - `0004_daemon_nodes.sql`
 - `0005_daemon_capabilities.sql`
   - daemon heartbeat capability fields and selection indexes
+- `0006_dispatch_jobs.sql`
+  - daemon dispatch lifecycle records and lookup indexes

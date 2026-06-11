@@ -95,9 +95,10 @@ scripts/distributed-onboarding-smoke.sh
 ```
 
 Set `MIZAN_DISTRIBUTED_RUN_CHAT=1` to include a daemon-backed
-`/v1/chat/completions` call after the distributed dispatch lifecycle is enabled.
-Until then, the smoke script validates self-serve onboarding and model
-visibility only.
+`/v1/chat/completions` call after an admin has created a daemon provider
+connection (`auth_mode=daemon`) and model route for `MIZAN_DISTRIBUTED_MODEL`.
+Without that route, the smoke script validates self-serve onboarding and daemon
+model visibility only.
 
 ## Expected Output
 

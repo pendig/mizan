@@ -167,6 +167,12 @@ health_addr = "127.0.0.1:19180"
 heartbeat_interval_seconds = 30
 ```
 
+To route client traffic through a daemon, create a provider connection with
+`auth_mode = "daemon"` and a model route whose `upstream_model` matches one of
+the daemon's `advertised_models`. The gateway will select a healthy daemon node,
+dispatch the job, wait for the daemon result, and return the normal
+OpenAI-compatible response.
+
 Run API, SQLite-backed storage, and Redis with Docker Compose:
 
 ```sh
