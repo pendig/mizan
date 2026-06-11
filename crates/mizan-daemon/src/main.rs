@@ -1,7 +1,7 @@
 use std::{net::SocketAddr, path::PathBuf, process, time::Duration};
 
 use clap::{Args, CommandFactory, Parser, Subcommand};
-use mizan_core::{AppError, AppResult, init_tracing};
+use mizan_core::{AppError, AppResult, init_tracing, redact_for_logs};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::{
@@ -99,11 +99,115 @@ async fn run(args: ConfigArgs) -> AppResult<()> {
                 warn!(error = %error, "daemon heartbeat failed");
             }
         }
+        if let Err(error) = lease_and_run_one_job(&client, &token, &config).await {
+            warn!(error = %error, "daemon dispatch job processing failed");
+        }
         sleep(Duration::from_secs(u64::from(
             config.heartbeat_interval_seconds.max(1),
         )))
         .await;
     }
+}
+
+async fn lease_and_run_one_job(
+    client: &reqwest::Client,
+    token: &str,
+    config: &DaemonConfig,
+) -> AppResult<()> {
+    let lease_url = control_plane_endpoint(&config.control_plane_url, "/daemon/jobs/lease");
+    let lease_response = client
+        .post(&lease_url)
+        .bearer_auth(token)
+        .send()
+        .await
+        .map_err(|error| AppError::infrastructure(format!("daemon job lease failed: {error}")))?;
+
+    let status = lease_response.status();
+    if !status.is_success() {
+        return Err(AppError::infrastructure(format!(
+            "daemon job lease rejected by control plane with status {status}"
+        )));
+    }
+
+    let lease: DispatchJobLeaseEnvelope = lease_response.json().await.map_err(|error| {
+        AppError::infrastructure(format!("invalid daemon job lease response: {error}"))
+    })?;
+    let Some(job) = lease.data else {
+        return Ok(());
+    };
+
+    let completion = match call_local_provider(client, config, &job.request).await {
+        Ok(response) => DispatchJobCompleteRequest {
+            status: "succeeded".to_owned(),
+            response: Some(response),
+            error_code: None,
+            error_message: None,
+        },
+        Err(error) => DispatchJobCompleteRequest {
+            status: "failed".to_owned(),
+            response: None,
+            error_code: Some("provider_error".to_owned()),
+            error_message: Some(redact_for_logs(error.to_string())),
+        },
+    };
+
+    let complete_url = control_plane_endpoint(
+        &config.control_plane_url,
+        &format!("/daemon/jobs/{}/complete", job.id),
+    );
+    let complete_response = client
+        .post(&complete_url)
+        .bearer_auth(token)
+        .json(&completion)
+        .send()
+        .await
+        .map_err(|error| {
+            AppError::infrastructure(format!("daemon job completion submit failed: {error}"))
+        })?;
+
+    let status = complete_response.status();
+    if !status.is_success() {
+        return Err(AppError::infrastructure(format!(
+            "daemon job completion rejected by control plane with status {status}"
+        )));
+    }
+
+    info!(
+        job_id = %job.id,
+        request_id = %job.request_id,
+        model = %job.model,
+        "daemon dispatch job completed"
+    );
+    Ok(())
+}
+
+async fn call_local_provider(
+    client: &reqwest::Client,
+    config: &DaemonConfig,
+    request: &ChatRequest,
+) -> AppResult<ChatResponse> {
+    let url = control_plane_endpoint(&config.local_provider_url, "/chat/completions");
+    let response = client
+        .post(url)
+        .json(request)
+        .send()
+        .await
+        .map_err(|error| {
+            AppError::infrastructure(format!("local provider request failed: {error}"))
+        })?;
+
+    let status = response.status();
+    let body = response.text().await.map_err(|error| {
+        AppError::infrastructure(format!("local provider response read failed: {error}"))
+    })?;
+    if !status.is_success() {
+        return Err(AppError::provider(format!(
+            "local provider returned status={status} body={}",
+            redact_for_logs(body)
+        )));
+    }
+
+    parse_chat_completion_response(&body, request.model.clone())
 }
 
 async fn register(args: ConfigArgs) -> AppResult<()> {
@@ -402,6 +506,101 @@ struct DaemonHeartbeatResponse {
     node_id: String,
     status: String,
     last_seen_at: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct DispatchJobLeaseEnvelope {
+    data: Option<DispatchJobLeaseResponse>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DispatchJobLeaseResponse {
+    id: String,
+    request_id: String,
+    model: String,
+    request: ChatRequest,
+}
+
+#[derive(Debug, Serialize)]
+struct DispatchJobCompleteRequest {
+    status: String,
+    response: Option<ChatResponse>,
+    error_code: Option<String>,
+    error_message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ChatRequest {
+    model: String,
+    messages: Vec<ChatMessage>,
+    #[serde(default)]
+    stream: bool,
+    #[serde(default)]
+    max_tokens: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ChatMessage {
+    role: String,
+    content: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ChatResponse {
+    provider: String,
+    model: String,
+    content: String,
+    usage: Option<TokenUsage>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TokenUsage {
+    prompt_tokens: u64,
+    completion_tokens: u64,
+    total_tokens: u64,
+    #[serde(default)]
+    estimated: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiChatCompletionResponse {
+    model: Option<String>,
+    choices: Vec<OpenAiChoice>,
+    usage: Option<TokenUsage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiChoice {
+    message: Option<OpenAiMessage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiMessage {
+    content: Option<String>,
+}
+
+fn parse_chat_completion_response(
+    raw_body: &str,
+    requested_model: String,
+) -> AppResult<ChatResponse> {
+    let response: OpenAiChatCompletionResponse = serde_json::from_str(raw_body)
+        .map_err(|error| AppError::provider(format!("invalid local provider response: {error}")))?;
+    let Some(first_choice) = response.choices.into_iter().next() else {
+        return Err(AppError::provider(
+            "local provider response returned no choices",
+        ));
+    };
+    let content = first_choice
+        .message
+        .and_then(|message| message.content)
+        .unwrap_or_default();
+
+    Ok(ChatResponse {
+        provider: "mizan-daemon".to_owned(),
+        model: response.model.unwrap_or(requested_model),
+        content,
+        usage: response.usage,
+    })
 }
 
 fn required_field<T>(value: Option<T>, key: &'static str) -> AppResult<T> {

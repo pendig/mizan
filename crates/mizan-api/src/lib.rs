@@ -19,6 +19,7 @@ use tracing::{info, warn};
 mod auth;
 mod billing;
 mod daemon_nodes;
+mod dispatch;
 mod gateway;
 mod logging;
 mod metrics;
@@ -220,6 +221,14 @@ pub fn router(state: AppState) -> Router {
         .route("/daemon/register", post(daemon_nodes::register_daemon_node))
         .route("/daemon/heartbeat", post(daemon_nodes::daemon_heartbeat))
         .route("/daemon/ping", get(daemon_nodes::daemon_ping))
+        .route(
+            "/daemon/jobs/lease",
+            post(dispatch::lease_next_dispatch_job),
+        )
+        .route(
+            "/daemon/jobs/{id}/complete",
+            post(dispatch::complete_dispatch_job),
+        )
         .route_layer(from_fn_with_state(
             state.clone(),
             daemon_nodes::daemon_node_auth,
