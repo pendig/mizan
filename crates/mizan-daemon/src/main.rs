@@ -206,7 +206,12 @@ async fn call_local_provider(
         config.local_provider_api_key.clone(),
     );
 
-    provider.chat_completions(&context, job.request.clone()).await
+    timeout(
+        Duration::from_secs(30),
+        provider.chat_completions(&context, job.request.clone()),
+    )
+    .await
+    .map_err(|_| AppError::infrastructure("local provider request timed out after 30 seconds"))?
 }
 
 async fn register(args: ConfigArgs) -> AppResult<()> {
@@ -633,7 +638,10 @@ heartbeat_interval_seconds = 15
         );
         let config = DaemonConfig::parse(&raw).expect("config should parse");
 
-        assert_eq!(config.local_provider_api_key.as_deref(), Some("local-secret"));
+        assert_eq!(
+            config.local_provider_api_key.as_deref(),
+            Some("local-secret")
+        );
     }
 
     #[test]
@@ -809,12 +817,9 @@ heartbeat_interval_seconds = 15
         }
 
         assert!(headers.starts_with("POST /v1/chat/completions HTTP/1.1"));
-        assert!(
-            headers
-                .lines()
-                .any(|line| line
-                    .eq_ignore_ascii_case(&format!("x-request-id: {expected_request_id}")))
-        );
+        assert!(headers.lines().any(|line| {
+            line.eq_ignore_ascii_case(&format!("x-request-id: {expected_request_id}"))
+        }));
         assert!(
             !headers
                 .lines()
