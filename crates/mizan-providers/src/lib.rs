@@ -108,7 +108,7 @@ pub trait ProviderAdapter: Send + Sync {
 pub struct OpenAiCompatibleProvider {
     name: String,
     base_url: String,
-    api_key: String,
+    api_key: Option<String>,
 }
 
 impl OpenAiCompatibleProvider {
@@ -122,10 +122,22 @@ impl OpenAiCompatibleProvider {
         base_url: impl Into<String>,
         api_key: impl Into<String>,
     ) -> Self {
+        Self::with_optional_api_key(name, base_url, Some(api_key.into()))
+    }
+
+    pub fn with_optional_api_key(
+        name: impl Into<String>,
+        base_url: impl Into<String>,
+        api_key: Option<String>,
+    ) -> Self {
+        let api_key = api_key
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty());
+
         Self {
             name: name.into(),
             base_url: base_url.into().trim().trim_end_matches('/').to_string(),
-            api_key: api_key.into(),
+            api_key,
         }
     }
 
@@ -142,10 +154,15 @@ impl OpenAiCompatibleProvider {
         request: reqwest::RequestBuilder,
         request_id: &str,
     ) -> reqwest::RequestBuilder {
-        request
+        let request = request
             .header(CONTENT_TYPE, HeaderValue::from_static("application/json"))
-            .header(AUTHORIZATION, format!("Bearer {}", self.api_key))
-            .header("x-request-id", request_id)
+            .header("x-request-id", request_id);
+
+        if let Some(api_key) = &self.api_key {
+            request.header(AUTHORIZATION, format!("Bearer {api_key}"))
+        } else {
+            request
+        }
     }
 }
 
