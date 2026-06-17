@@ -86,13 +86,16 @@ or an enterprise-grade marketplace.
 ## UI release target
 
 ### Planned pages
-- Login / register
-- Admin overview
-- Provider connections
-- Model routes
-- Credits and grants
-- API key management
-- Usage and limits
+
+- `ui/login` (Login)
+- `ui/register` (Register)
+- `ui/user` (User dashboard)
+- `ui/user/keys` (API key management)
+- `ui/user/usage` (Usage history)
+- `ui/admin` (Admin overview)
+- `ui/admin/providers` (Provider connections)
+- `ui/admin/routes` (Model routes)
+- `ui/admin/usage` (Usage and grants overview)
 
 ### UI screenshot placeholders
 
