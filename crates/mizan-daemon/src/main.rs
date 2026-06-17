@@ -17,6 +17,8 @@ use uuid::Uuid;
 const DAEMON_SIGNATURE_HEADER: &str = "x-mizan-daemon-signature";
 const DAEMON_SIGNATURE_TIMESTAMP_HEADER: &str = "x-mizan-daemon-timestamp";
 const DAEMON_SIGNATURE_NONCE_HEADER: &str = "x-mizan-daemon-nonce";
+const DAEMON_SIGNATURE_BODY_HASH_HEADER: &str = "x-mizan-daemon-body-hash";
+const EMPTY_BODY_HASH: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 
 #[tokio::main]
 async fn main() {
@@ -125,7 +127,7 @@ async fn lease_and_run_one_job(
     let lease_url = control_plane_endpoint(&config.control_plane_url, "/daemon/jobs/lease");
     let lease_response = client
         .post(&lease_url)
-        .then_sign(token, "POST", "/daemon/jobs/lease")
+        .then_sign(token, "POST", "/daemon/jobs/lease", EMPTY_BODY_HASH)
         .bearer_auth(token)
         .send()
         .await
@@ -166,7 +168,12 @@ async fn lease_and_run_one_job(
     );
     let complete_response = client
         .post(&complete_url)
-        .then_sign(token, "POST", &format!("/daemon/jobs/{}/complete", job.id))
+        .then_sign(
+            token,
+            "POST",
+            &format!("/daemon/jobs/{}/complete", job.id),
+            &hash_body(&completion)?,
+        )
         .bearer_auth(token)
         .json(&completion)
         .send()
@@ -230,19 +237,25 @@ async fn register(args: ConfigArgs) -> AppResult<()> {
 
     let registration_url = control_plane_endpoint(&config.control_plane_url, "/daemon/register");
     let client = daemon_http_client()?;
+    let registration_request = DaemonRegistrationRequest {
+        hostname: std::env::var("HOSTNAME")
+            .ok()
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty()),
+        public_key: None,
+        capabilities: config.capabilities_payload(),
+    };
 
     let response = client
         .post(&registration_url)
-        .then_sign(&token, "POST", "/daemon/register")
+        .then_sign(
+            &token,
+            "POST",
+            "/daemon/register",
+            &hash_body(&registration_request)?,
+        )
         .bearer_auth(&token)
-        .json(&DaemonRegistrationRequest {
-            hostname: std::env::var("HOSTNAME")
-                .ok()
-                .map(|value| value.trim().to_owned())
-                .filter(|value| !value.is_empty()),
-            public_key: None,
-            capabilities: config.capabilities_payload(),
-        })
+        .json(&registration_request)
         .send()
         .await
         .map_err(|error| {
@@ -292,18 +305,20 @@ async fn send_heartbeat(
     token: &str,
     config: &DaemonConfig,
 ) -> AppResult<DaemonHeartbeatResponse> {
+    let heartbeat_request = DaemonHeartbeatRequest {
+        hostname: std::env::var("HOSTNAME")
+            .ok()
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty()),
+        public_key: None,
+        capabilities: config.capabilities_payload(),
+    };
+
     let response = client
         .post(heartbeat_url)
-        .then_sign(token, "POST", "/daemon/heartbeat")
+        .then_sign(token, "POST", "/daemon/heartbeat", &hash_body(&heartbeat_request)?)
         .bearer_auth(token)
-        .json(&DaemonHeartbeatRequest {
-            hostname: std::env::var("HOSTNAME")
-                .ok()
-                .map(|value| value.trim().to_owned())
-                .filter(|value| !value.is_empty()),
-            public_key: None,
-            capabilities: config.capabilities_payload(),
-        })
+        .json(&heartbeat_request)
         .send()
         .await
         .map_err(|error| AppError::infrastructure(format!("daemon heartbeat failed: {error}")))?;
@@ -349,8 +364,19 @@ fn now_utc_timestamp_seconds() -> i64 {
 }
 
 fn hash_token(token: &str) -> String {
+    hash_bytes(token.as_bytes())
+}
+
+fn hash_body<T: Serialize>(body: &T) -> AppResult<String> {
+    let payload = serde_json::to_vec(body)
+        .map_err(|error| AppError::infrastructure(format!("daemon body hash failed: {error}")))?;
+
+    Ok(hash_bytes(&payload))
+}
+
+fn hash_bytes(bytes: &[u8]) -> String {
     let mut digest = Sha256::new();
-    digest.update(token.as_bytes());
+    digest.update(bytes);
     digest
         .finalize()
         .iter()
@@ -364,6 +390,7 @@ fn compute_request_signature(
     path: &str,
     timestamp: i64,
     nonce: &str,
+    body_hash: &str,
 ) -> String {
     let mut digest = Sha256::new();
     digest.update(token_hash);
@@ -375,6 +402,8 @@ fn compute_request_signature(
     digest.update(timestamp.to_string().as_bytes());
     digest.update("|");
     digest.update(nonce);
+    digest.update("|");
+    digest.update(body_hash);
     digest
         .finalize()
         .iter()
@@ -383,18 +412,20 @@ fn compute_request_signature(
 }
 
 trait SignedRequest {
-    fn then_sign(self, token: &str, method: &str, path: &str) -> Self;
+    fn then_sign(self, token: &str, method: &str, path: &str, body_hash: &str) -> Self;
 }
 
 impl SignedRequest for reqwest::RequestBuilder {
-    fn then_sign(self, token: &str, method: &str, path: &str) -> Self {
+    fn then_sign(self, token: &str, method: &str, path: &str, body_hash: &str) -> Self {
         let token_hash = hash_token(token);
         let timestamp = now_utc_timestamp_seconds();
         let nonce = Uuid::new_v4().to_string();
-        let signature = compute_request_signature(&token_hash, method, path, timestamp, &nonce);
+        let signature =
+            compute_request_signature(&token_hash, method, path, timestamp, &nonce, body_hash);
 
         self.header(DAEMON_SIGNATURE_TIMESTAMP_HEADER, timestamp.to_string())
             .header(DAEMON_SIGNATURE_NONCE_HEADER, nonce)
+            .header(DAEMON_SIGNATURE_BODY_HASH_HEADER, body_hash)
             .header(DAEMON_SIGNATURE_HEADER, signature)
     }
 }
@@ -783,6 +814,7 @@ heartbeat_interval_seconds = 15
             "/daemon/register",
             1712345678,
             "nonce-1",
+            EMPTY_BODY_HASH,
         );
         let signature_two = compute_request_signature(
             &token_hash,
@@ -790,18 +822,20 @@ heartbeat_interval_seconds = 15
             "/daemon/register",
             1712345678,
             "nonce-1",
+            EMPTY_BODY_HASH,
         );
 
         assert_eq!(signature_one, signature_two);
         assert_ne!(
             signature_one,
             compute_request_signature(
-                &token_hash,
-                "GET",
-                "/daemon/register",
-                1712345678,
-                "nonce-1"
-            )
+            &token_hash,
+            "GET",
+            "/daemon/register",
+            1712345678,
+            "nonce-1",
+            EMPTY_BODY_HASH,
+        )
         );
     }
 

@@ -32,6 +32,8 @@ const DAEMON_SIGNATURE_TTL_SECONDS: i64 = 300;
 const DAEMON_SIGNATURE_HEADER: &str = "x-mizan-daemon-signature";
 const DAEMON_SIGNATURE_NONCE_HEADER: &str = "x-mizan-daemon-nonce";
 const DAEMON_SIGNATURE_TIMESTAMP_HEADER: &str = "x-mizan-daemon-timestamp";
+const DAEMON_SIGNATURE_BODY_HASH_HEADER: &str = "x-mizan-daemon-body-hash";
+const DAEMON_SIGNATURE_NONCE_CACHE_PRUNE_THRESHOLD: usize = 256;
 const AUDIT_ACTION_CREATE_DAEMON_NODE: &str = "daemon_node_created";
 const AUDIT_ACTION_REVOKE_DAEMON_NODE: &str = "daemon_node_revoked";
 const AUDIT_ENTITY_DAEMON_NODE: &str = "daemon_node";
@@ -451,11 +453,7 @@ pub async fn daemon_node_auth(
     validate_daemon_request_signature(
         &state,
         request.method().as_str(),
-        request
-            .uri()
-            .path_and_query()
-            .map(|value| value.as_str())
-            .unwrap_or("/"),
+        request.uri().path(),
         request.headers(),
         &identity,
     )
@@ -554,6 +552,15 @@ async fn validate_daemon_request_signature(
         StatusCode::UNAUTHORIZED,
         AppError::Unauthorized,
     )?;
+    let body_hash = headers
+        .get(DAEMON_SIGNATURE_BODY_HASH_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .unwrap_or("");
+
+    if requires_body_signature(path) && body_hash.is_empty() {
+        return Err(map_error(StatusCode::UNAUTHORIZED, AppError::Unauthorized));
+    }
 
     let timestamp = parse_timestamp(timestamp_raw).map_err(|error| {
         map_error(
@@ -562,9 +569,17 @@ async fn validate_daemon_request_signature(
         )
     })?;
     let now = now_utc_epoch_seconds();
-    if (now - timestamp).abs() > DAEMON_SIGNATURE_TTL_SECONDS {
+    let age_seconds = now
+        .checked_sub(timestamp)
+        .and_then(|delta| delta.checked_abs())
+        .ok_or_else(|| map_error(StatusCode::UNAUTHORIZED, AppError::Unauthorized))?;
+    if age_seconds > DAEMON_SIGNATURE_TTL_SECONDS {
         return Err(map_error(StatusCode::UNAUTHORIZED, AppError::Unauthorized));
     }
+
+    let nonce_expiry = timestamp
+        .checked_add(DAEMON_SIGNATURE_TTL_SECONDS)
+        .ok_or_else(|| map_error(StatusCode::UNAUTHORIZED, AppError::Unauthorized))?;
 
     if !verify_daemon_signature(
         &identity.token_hash,
@@ -572,25 +587,35 @@ async fn validate_daemon_request_signature(
         path,
         timestamp,
         nonce,
+        body_hash,
         signature,
     ) {
         return Err(map_error(StatusCode::UNAUTHORIZED, AppError::Unauthorized));
     }
 
     let mut nonces = state.daemon_signature_nonce_cache.write().await;
-    prune_stale_nonces(&mut nonces, now);
+    if nonces.len() >= DAEMON_SIGNATURE_NONCE_CACHE_PRUNE_THRESHOLD {
+        prune_stale_nonces(&mut nonces, now);
+    }
     let nonce_key = format!("{}::{nonce}", identity.node_id);
 
     if nonces.contains_key(&nonce_key) {
         return Err(map_error(StatusCode::UNAUTHORIZED, AppError::Unauthorized));
     }
 
-    nonces.insert(nonce_key, now);
+    nonces.insert(nonce_key, nonce_expiry);
+
     Ok(())
 }
 
+fn requires_body_signature(path: &str) -> bool {
+    path == "/daemon/register"
+        || path == "/daemon/heartbeat"
+        || path.starts_with("/daemon/jobs/") && path.ends_with("/complete")
+}
+
 fn prune_stale_nonces(nonces: &mut HashMap<String, i64>, now: i64) {
-    nonces.retain(|_, seen_at| now.saturating_sub(*seen_at) <= DAEMON_SIGNATURE_TTL_SECONDS);
+    nonces.retain(|_, expires_at| now <= *expires_at);
 }
 
 fn verify_daemon_signature(
@@ -599,10 +624,11 @@ fn verify_daemon_signature(
     path: &str,
     timestamp: i64,
     nonce: &str,
+    body_hash: &str,
     signature: &str,
 ) -> bool {
     secure_eq(
-        &compute_daemon_signature(token_hash, method, path, timestamp, nonce),
+        &compute_daemon_signature(token_hash, method, path, timestamp, nonce, body_hash),
         signature,
     )
 }
@@ -613,6 +639,7 @@ fn compute_daemon_signature(
     path: &str,
     timestamp: i64,
     nonce: &str,
+    body_hash: &str,
 ) -> String {
     let mut digest = Sha256::new();
     digest.update(token_hash);
@@ -624,6 +651,8 @@ fn compute_daemon_signature(
     digest.update(timestamp.to_string().as_bytes());
     digest.update("|");
     digest.update(nonce);
+    digest.update("|");
+    digest.update(body_hash);
     digest
         .finalize()
         .iter()
@@ -647,7 +676,16 @@ fn header_value<'a>(
 }
 
 fn secure_eq(left: &str, right: &str) -> bool {
-    left.len() == right.len() && left.bytes().zip(right.bytes()).all(|(l, r)| l == r)
+    if left.len() != right.len() {
+        return false;
+    }
+
+    let mut diff = 0u8;
+    for (left, right) in left.bytes().zip(right.bytes()) {
+        diff |= left ^ right;
+    }
+
+    diff == 0
 }
 
 async fn mark_node_seen(
@@ -1254,7 +1292,14 @@ mod tests {
     fn verifies_request_signature_matches_expected_payload() {
         let secret = hash_value("mizan_sk_daemon_signing");
         let signature =
-            compute_daemon_signature(&secret, "POST", "/daemon/heartbeat", 1712345678, "n-123");
+            compute_daemon_signature(
+                &secret,
+                "POST",
+                "/daemon/heartbeat",
+                1712345678,
+                "n-123",
+                "",
+            );
 
         assert!(verify_daemon_signature(
             &secret,
@@ -1262,6 +1307,7 @@ mod tests {
             "/daemon/heartbeat",
             1712345678,
             "n-123",
+            "",
             &signature
         ));
         assert!(!verify_daemon_signature(
@@ -1270,6 +1316,16 @@ mod tests {
             "/daemon/heartbeat",
             1712345678,
             "n-456",
+            "",
+            &signature
+        ));
+        assert!(!verify_daemon_signature(
+            &secret,
+            "POST",
+            "/daemon/heartbeat",
+            1712345678,
+            "n-123",
+            "abc",
             &signature
         ));
     }
