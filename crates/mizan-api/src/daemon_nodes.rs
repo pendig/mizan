@@ -642,7 +642,7 @@ fn header_value<'a>(
         .and_then(|value| value.to_str().ok())
         .map(|value| value.trim())
         .filter(|value| !value.is_empty())
-        .map(|value| Ok(value))
+        .map(Ok)
         .unwrap_or_else(|| Err(map_error(status, error)))
 }
 
