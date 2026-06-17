@@ -777,11 +777,32 @@ heartbeat_interval_seconds = 15
     #[test]
     fn computes_deterministic_request_signature() {
         let token_hash = hash_token("mizan_sk_daemon_abc");
-        let signature_one = compute_request_signature(&token_hash, "POST", "/daemon/register", 1712345678, "nonce-1");
-        let signature_two = compute_request_signature(&token_hash, "POST", "/daemon/register", 1712345678, "nonce-1");
+        let signature_one = compute_request_signature(
+            &token_hash,
+            "POST",
+            "/daemon/register",
+            1712345678,
+            "nonce-1",
+        );
+        let signature_two = compute_request_signature(
+            &token_hash,
+            "POST",
+            "/daemon/register",
+            1712345678,
+            "nonce-1",
+        );
 
         assert_eq!(signature_one, signature_two);
-        assert_ne!(signature_one, compute_request_signature(&token_hash, "GET", "/daemon/register", 1712345678, "nonce-1"));
+        assert_ne!(
+            signature_one,
+            compute_request_signature(
+                &token_hash,
+                "GET",
+                "/daemon/register",
+                1712345678,
+                "nonce-1"
+            )
+        );
     }
 
     #[tokio::test]

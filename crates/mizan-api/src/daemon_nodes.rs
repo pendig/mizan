@@ -1,19 +1,15 @@
 use axum::Json;
 use axum::body::Body;
 use axum::extract::{Extension, Path, State};
-use axum::http::{
-    Request,
-    StatusCode,
-    header::{AUTHORIZATION},
-};
+use axum::http::{Request, StatusCode, header::AUTHORIZATION};
 use axum::middleware::Next;
 use axum::response::Response;
-use std::collections::HashMap;
 use mizan_core::{AppError, DatabaseBackend, ErrorEnvelope};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use sqlx::{AnyPool, FromRow, query, query_as};
+use std::collections::HashMap;
 use tracing::{Instrument, info_span, warn};
 use uuid::Uuid;
 
@@ -455,7 +451,11 @@ pub async fn daemon_node_auth(
     validate_daemon_request_signature(
         &state,
         request.method().as_str(),
-        request.uri().path_and_query().map(|value| value.as_str()).unwrap_or("/"),
+        request
+            .uri()
+            .path_and_query()
+            .map(|value| value.as_str())
+            .unwrap_or("/"),
         request.headers(),
         &identity,
     )
@@ -1253,7 +1253,8 @@ mod tests {
     #[test]
     fn verifies_request_signature_matches_expected_payload() {
         let secret = hash_value("mizan_sk_daemon_signing");
-        let signature = compute_daemon_signature(&secret, "POST", "/daemon/heartbeat", 1712345678, "n-123");
+        let signature =
+            compute_daemon_signature(&secret, "POST", "/daemon/heartbeat", 1712345678, "n-123");
 
         assert!(verify_daemon_signature(
             &secret,

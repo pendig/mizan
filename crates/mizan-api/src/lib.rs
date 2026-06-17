@@ -14,8 +14,8 @@ use sqlx::{AnyPool, query_scalar};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::net::TcpListener;
-use tokio::task;
 use tokio::sync::RwLock;
+use tokio::task;
 use tower_http::trace::TraceLayer;
 use tracing::{info, warn};
 
