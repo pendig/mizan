@@ -152,7 +152,7 @@ Exit criteria:
 
 ## Phase 7 - Admin/User Thin UI or CLI
 
-Status: API-only alpha surface implemented
+Status: API-only alpha surface implemented (UI not started)
 
 Choose one lean path:
 
@@ -170,6 +170,25 @@ Recommended for fastest MVP:
 Exit criteria:
 
 - A non-core contributor can run and test the project locally.
+
+## Phase 7.1 - Thin Admin/User UI (Planned)
+
+Status: Not started
+
+Deliverables:
+
+- Admin login and session bootstrap.
+- Admin dashboard shell with provider connections CRUD.
+- Admin dashboard route to manage model routes and daemon nodes.
+- Admin dashboard pages for key, credit, and usage operations.
+- User dashboard shell with key creation/use view.
+- User usage and billing-like summaries.
+
+Exit criteria:
+
+- Basic admin and user workflows no longer require curl for normal operations.
+- API-bound screens use the live API endpoints and shared auth/session flow.
+- The first screens load with non-empty data from a clean local stack.
 
 ## First Public Alpha Scope
 

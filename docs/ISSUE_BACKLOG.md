@@ -97,3 +97,14 @@ Progress status (current): Milestone 4 completed with non-streaming chat proxy f
 5. Add latency histograms.
 6. Propagate request and trace context through all layers.
 7. Keep alpha validation scriptable through `docs/ALPHA_RUNBOOK.md`.
+
+## Phase 7.1 - Thin UI
+
+1. Decide stack and auth strategy (minimal client-side session + token handling).
+2. Build admin login and token refresh handling.
+3. Build admin dashboard shell and shared navigation.
+4. Build provider connections and model routes management screens.
+5. Build API key, wallet, and usage pages for admin.
+6. Build user-facing key and usage pages with request history list.
+7. Add basic usage/error/error-code visibility cards.
+8. Add minimal end-to-end path smoke coverage for login and one admin CRUD action.
