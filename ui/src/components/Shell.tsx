@@ -54,6 +54,9 @@ export default function Shell({ children }: { children: React.ReactNode }) {
                     <Link className="rounded-xl px-2 py-1 hover:text-shell-accent" to="/admin/usage">
                       Usage
                     </Link>
+                    <Link className="rounded-xl px-2 py-1 hover:text-shell-accent" to="/admin/daemons">
+                      Daemons
+                    </Link>
                   </>
                 ) : (
                   <>

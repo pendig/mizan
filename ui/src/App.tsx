@@ -8,6 +8,7 @@ import { AdminOverviewPage } from '@/pages/admin/AdminOverviewPage';
 import { AdminProvidersPage } from '@/pages/admin/AdminProvidersPage';
 import { AdminRoutesPage } from '@/pages/admin/AdminRoutesPage';
 import { AdminUsagePage } from '@/pages/admin/AdminUsagePage';
+import { AdminDaemonNodesPage } from '@/pages/admin/AdminDaemonNodesPage';
 import { NotFoundPage } from '@/pages/NotFoundPage';
 import { RequireAuth } from '@/components/RequireAuth';
 import Shell from '@/components/Shell';
@@ -56,7 +57,7 @@ export function App() {
           path="/admin/daemons"
           element={
             <RequireAuth requireAdmin>
-              <div className="rounded-2xl border border-shell-border bg-shell-card p-4">Coming soon.</div>
+              <AdminDaemonNodesPage />
             </RequireAuth>
           }
         />

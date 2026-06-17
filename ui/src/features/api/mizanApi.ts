@@ -15,6 +15,11 @@ import type {
   WalletResponse,
   UsageListResponse,
   CreditGrantPayload,
+  AdminUsageQueryFilters,
+  DaemonNodesResponse,
+  DaemonNodeCreatePayload,
+  DaemonNodeCreateResponse,
+  DaemonNodeRevokeResponse,
 } from '@/app/types';
 
 const DEFAULT_API_URL = 'http://127.0.0.1:18180';
@@ -146,10 +151,16 @@ export const mizanApi = createApi({
       providesTags: ['Wallet'],
     }),
 
-    listAdminUsage: builder.query<UsageListResponse, { userId?: string }>({
-      query: ({ userId }) => {
+    listAdminUsage: builder.query<UsageListResponse, AdminUsageQueryFilters>({
+      query: ({ userId, daemonNodeId, hostUserId, createdAfter, createdBefore, limit, offset }) => {
         const params = new URLSearchParams();
         if (userId) params.set('user_id', userId);
+        if (daemonNodeId) params.set('daemon_node_id', daemonNodeId);
+        if (hostUserId) params.set('host_user_id', hostUserId);
+        if (createdAfter) params.set('created_after', createdAfter);
+        if (createdBefore) params.set('created_before', createdBefore);
+        if (typeof limit === 'number') params.set('limit', String(limit));
+        if (typeof offset === 'number') params.set('offset', String(offset));
         const suffix = params.toString() ? `?${params.toString()}` : '';
         return { url: `/admin/usage${suffix}` };
       },
@@ -165,9 +176,26 @@ export const mizanApi = createApi({
       invalidatesTags: ['Wallet', 'Usage'],
     }),
 
-    listDaemonNodes: builder.query<{ data: any[] }, void>({
+    listDaemonNodes: builder.query<DaemonNodesResponse, void>({
       query: () => '/admin/daemon-nodes',
       providesTags: ['DaemonNodes'],
+    }),
+
+    createDaemonNode: builder.mutation<DaemonNodeCreateResponse, DaemonNodeCreatePayload>({
+      query: (body) => ({
+        url: '/admin/daemon-nodes',
+        method: 'POST',
+        body,
+      }),
+      invalidatesTags: ['DaemonNodes'],
+    }),
+
+    revokeDaemonNode: builder.mutation<DaemonNodeRevokeResponse, string>({
+      query: (id) => ({
+        url: `/admin/daemon-nodes/${id}`,
+        method: 'DELETE',
+      }),
+      invalidatesTags: ['DaemonNodes'],
     }),
   }),
 });
@@ -191,4 +219,6 @@ export const {
   useListAdminUsageQuery,
   useGrantCreditsMutation,
   useListDaemonNodesQuery,
+  useCreateDaemonNodeMutation,
+  useRevokeDaemonNodeMutation,
 } = mizanApi;

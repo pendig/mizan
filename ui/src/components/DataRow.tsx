@@ -15,3 +15,37 @@ export function DataCard({ title, action, children }: { title: string; action?: 
 export function EmptyState({ children }: { children: ReactNode }) {
   return <div className="rounded-xl border border-dashed border-shell-border p-3 text-slate-400">{children}</div>;
 }
+
+export function QueryState({
+  isLoading,
+  isError,
+  isEmpty,
+  isEmptyText,
+}: {
+  isLoading: boolean;
+  isError: unknown;
+  isEmpty: boolean;
+  isEmptyText: string;
+}) {
+  if (isLoading) {
+    return <p>Loading...</p>;
+  }
+
+  if (isError) {
+    return <p className="text-sm text-rose-300">Terjadi error saat memuat data.</p>;
+  }
+
+  if (isEmpty) {
+    return <EmptyState>{isEmptyText}</EmptyState>;
+  }
+
+  return null;
+}
+
+export function ErrorText({ children }: { children: ReactNode }) {
+  return <p className="text-sm text-rose-300">{children}</p>;
+}
+
+export function EmptyText({ children }: { children: ReactNode }) {
+  return <EmptyState>{children}</EmptyState>;
+}

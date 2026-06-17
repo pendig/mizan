@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { DataCard, EmptyState } from '@/components/DataRow';
+import { DataCard, ErrorText, QueryState } from '@/components/DataRow';
 import {
   useCreateModelRouteMutation,
   useDeleteModelRouteMutation,
@@ -8,20 +8,23 @@ import {
 } from '@/features/api/mizanApi';
 
 export function AdminRoutesPage() {
-  const { data: routesData, isLoading: routeLoading } = useListModelRoutesQuery();
-  const { data: providerData, isLoading: providerLoading } = useListProviderConnectionsQuery();
+  const { data: routesData, isLoading: routeLoading, isError: routeError, refetch: refetchRoutes } =
+    useListModelRoutesQuery();
+  const {
+    data: providerData,
+    isLoading: providerLoading,
+    isError: providerError,
+    refetch: refetchProviders,
+  } = useListProviderConnectionsQuery();
 
   const [providerConnectionId, setProviderConnectionId] = useState('');
   const [publicModel, setPublicModel] = useState('mizan/smart');
   const [upstreamModel, setUpstreamModel] = useState('gpt-4o-mini');
 
-  const [createRoute, { isLoading: creating }] = useCreateModelRouteMutation();
+  const [createRoute, { isLoading: creating, error: createError }] = useCreateModelRouteMutation();
   const [deleteRoute] = useDeleteModelRouteMutation();
 
-  const providerOptions = useMemo(
-    () => providerData?.data ?? [],
-    [providerData],
-  );
+  const providerOptions = useMemo(() => providerData?.data ?? [], [providerData]);
 
   useEffect(() => {
     if (!providerConnectionId && providerOptions.length > 0) {
@@ -36,19 +39,22 @@ export function AdminRoutesPage() {
         action={
           <button
             type="button"
-            onClick={() =>
+            onClick={() => {
+              if (!providerConnectionId || creating || providerLoading) {
+                return;
+              }
               createRoute({
                 provider_connection_id: providerConnectionId,
                 public_model: publicModel.trim(),
                 upstream_model: upstreamModel.trim(),
                 pricing_input_per_1m_tokens: 250,
                 pricing_output_per_1m_tokens: 1000,
-              })
-            }
-            disabled={creating || providerLoading}
+              });
+            }}
+            disabled={creating || providerLoading || !providerConnectionId}
             className="rounded-lg border border-shell-border px-3 py-2"
           >
-            Simpan
+            {creating ? 'Menyimpan...' : 'Simpan'}
           </button>
         }
       >
@@ -78,19 +84,39 @@ export function AdminRoutesPage() {
             placeholder="Upstream model"
           />
         </div>
+        {createError ? <ErrorText>{extractErrorMessage(createError)}</ErrorText> : null}
       </DataCard>
 
       <DataCard title="Model routes">
-        {routeLoading ? (
-          <p>Loading...</p>
-        ) : routesData?.data.length === 0 ? (
-          <EmptyState>Belum ada route.</EmptyState>
-        ) : (
+        <div className="mb-3 flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => {
+              void refetchRoutes();
+              void refetchProviders();
+            }}
+            className="rounded-lg border border-shell-border px-2 py-1 text-xs"
+          >
+            Refresh
+          </button>
+          {routeError || providerError ? <p className="text-xs text-slate-400">Gagal load daftar</p> : null}
+        </div>
+
+        <QueryState
+          isLoading={routeLoading}
+          isError={routeError || providerError}
+          isEmpty={!routeLoading && !routeError && !providerError && routesData?.data.length === 0}
+          isEmptyText="Belum ada route."
+        />
+
+        {!routeLoading && !routeError && !providerError && routesData?.data && routesData.data.length > 0 ? (
           <ul className="space-y-2">
-            {routesData?.data.map((route) => (
+            {routesData.data.map((route) => (
               <li key={route.id} className="flex items-center justify-between rounded-lg border border-shell-border p-3">
                 <div>
-                  <p className="font-medium">{route.public_model} -> {route.upstream_model}</p>
+                  <p className="font-medium">
+                    {route.public_model} {'\u2192'} {route.upstream_model}
+                  </p>
                   <p className="text-xs text-slate-400">provider: {route.provider_connection_id}</p>
                 </div>
                 <button
@@ -103,8 +129,26 @@ export function AdminRoutesPage() {
               </li>
             ))}
           </ul>
-        )}
+        ) : null}
       </DataCard>
     </div>
   );
+}
+
+function extractErrorMessage(error: unknown) {
+  if (typeof error === 'string') {
+    return error;
+  }
+
+  if (error && typeof error === 'object' && 'data' in error) {
+    const maybeData = (error as { data?: unknown }).data;
+    if (maybeData && typeof maybeData === 'object') {
+      const message = (maybeData as { error?: string; message?: string }).error ?? (maybeData as { message?: string }).message;
+      if (typeof message === 'string') {
+        return message;
+      }
+    }
+  }
+
+  return 'Gagal membuat route.';
 }

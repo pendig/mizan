@@ -59,15 +59,6 @@ export interface ProviderConnectionCreatePayload {
   enabled?: boolean;
 }
 
-export interface ProviderConnectionCreateResponse {
-  id: string;
-  name: string;
-  provider_type: string;
-  auth_mode: string;
-  base_url: string;
-  enabled: boolean;
-}
-
 export interface ProviderConnectionsResponse {
   data: ProviderConnection[];
 }
@@ -133,14 +124,66 @@ export interface CreditGrantPayload {
   reason?: string;
 }
 
+export interface AdminUsageQueryFilters {
+  userId?: string;
+  daemonNodeId?: string;
+  hostUserId?: string;
+  createdAfter?: string;
+  createdBefore?: string;
+  limit?: number;
+  offset?: number;
+}
+
 export interface DaemonNode {
   id: string;
-  host: string;
-  provider: string;
-  enabled: boolean;
+  host_user_id?: string;
+  label?: string;
+  hostname?: string;
+  public_key?: string;
+  status: string;
+  revoked: boolean;
+  disabled: boolean;
   last_seen_at?: string;
+  capabilities: DaemonNodeCapabilities;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface DaemonNodeCapabilities {
+  provider_family?: string;
+  model_ids: string[];
+  max_concurrency?: number;
+  region?: string;
+  labels: string[];
+  health_status?: string;
+  metadata?: Record<string, unknown>;
+  pricing_metadata?: Record<string, unknown>;
 }
 
 export interface DaemonNodesResponse {
   data: DaemonNode[];
+}
+
+export interface DaemonNodeCreatePayload {
+  host_user_id?: string;
+  label?: string;
+  hostname?: string;
+  public_key?: string;
+}
+
+export interface DaemonNodeCreateResponse {
+  id: string;
+  token: string;
+  token_type: string;
+  status: string;
+  host_user_id?: string;
+  label?: string;
+  hostname?: string;
+  public_key?: string;
+  created_at: string;
+}
+
+export interface DaemonNodeRevokeResponse {
+  id: string;
+  revoked: boolean;
 }
