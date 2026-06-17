@@ -316,7 +316,12 @@ async fn send_heartbeat(
 
     let response = client
         .post(heartbeat_url)
-        .then_sign(token, "POST", "/daemon/heartbeat", &hash_body(&heartbeat_request)?)
+        .then_sign(
+            token,
+            "POST",
+            "/daemon/heartbeat",
+            &hash_body(&heartbeat_request)?,
+        )
         .bearer_auth(token)
         .json(&heartbeat_request)
         .send()
@@ -829,13 +834,13 @@ heartbeat_interval_seconds = 15
         assert_ne!(
             signature_one,
             compute_request_signature(
-            &token_hash,
-            "GET",
-            "/daemon/register",
-            1712345678,
-            "nonce-1",
-            EMPTY_BODY_HASH,
-        )
+                &token_hash,
+                "GET",
+                "/daemon/register",
+                1712345678,
+                "nonce-1",
+                EMPTY_BODY_HASH,
+            )
         );
     }
 

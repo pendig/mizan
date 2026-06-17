@@ -1291,15 +1291,14 @@ mod tests {
     #[test]
     fn verifies_request_signature_matches_expected_payload() {
         let secret = hash_value("mizan_sk_daemon_signing");
-        let signature =
-            compute_daemon_signature(
-                &secret,
-                "POST",
-                "/daemon/heartbeat",
-                1712345678,
-                "n-123",
-                "",
-            );
+        let signature = compute_daemon_signature(
+            &secret,
+            "POST",
+            "/daemon/heartbeat",
+            1712345678,
+            "n-123",
+            "",
+        );
 
         assert!(verify_daemon_signature(
             &secret,
