@@ -158,6 +158,8 @@ Minimal `mizan-daemon.toml`:
 control_plane_url = "http://127.0.0.1:18180"
 daemon_token_path = "/run/secrets/mizan-daemon-token"
 local_provider_url = "http://127.0.0.1:11434/v1"
+# Optional for local providers that require bearer auth.
+# local_provider_api_key = "local-secret"
 provider_family = "openai-compatible"
 advertised_models = ["llama3.1"]
 max_concurrency = 2
