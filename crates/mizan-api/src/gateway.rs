@@ -387,6 +387,7 @@ async fn chat_completions_impl(
                 api_key_id: Some(identity.api_key_id),
                 provider_id: Some(route.provider_connection_id),
                 route_id: Some(route.id),
+                daemon_node_id: None,
                 model: public_model.to_string(),
                 usage: prompt_only_usage,
                 status_code: status.as_u16(),
@@ -496,6 +497,7 @@ async fn chat_completions_impl(
                         api_key_id: Some(identity.api_key_id),
                         provider_id: Some(route.provider_connection_id),
                         route_id: Some(route.id),
+                        daemon_node_id: None,
                         model: public_model.to_string(),
                         usage,
                         status_code: status.as_u16(),
@@ -577,6 +579,7 @@ async fn chat_completions_impl(
                         api_key_id: Some(identity.api_key_id),
                         provider_id: Some(route.provider_connection_id),
                         route_id: Some(route.id),
+                        daemon_node_id: None,
                         model: public_model.to_string(),
                         usage,
                         status_code: status.as_u16(),
@@ -633,6 +636,7 @@ async fn chat_completions_impl(
                 api_key_id: Some(identity.api_key_id),
                 provider_id: Some(route.provider_connection_id),
                 route_id: Some(route.id),
+                daemon_node_id: None,
                 model: public_model.to_string(),
                 usage,
                 status_code: StatusCode::OK.as_u16(),
@@ -772,7 +776,8 @@ async fn handle_daemon_chat_completion(
         request_started_at,
     )
     .with_route_alias(public_model.clone())
-    .with_provider_alias("mizan-daemon");
+    .with_provider_alias("mizan-daemon")
+    .with_daemon_node_id(node.id);
 
     let effective_max_tokens =
         match resolve_effective_max_tokens(payload.max_tokens, None, spec.max_tokens_field) {
@@ -813,10 +818,11 @@ async fn handle_daemon_chat_completion(
         let error_code = error_code_from_app_error(&error);
         record_gateway_request_completion(&completion_log, status, Some(&error_code)).await;
         let (status, body) = from_app_error(error);
-        observe_gateway_metrics(
+        observe_gateway_metrics_with_daemon_node(
             &state.metrics,
             &context,
             &public_model,
+            Some(node.id),
             prompt_only_usage,
             status,
             request_started_at.elapsed().as_millis() as u64,
@@ -841,10 +847,11 @@ async fn handle_daemon_chat_completion(
             let error_code = error_code_from_app_error(&error);
             record_gateway_request_completion(&completion_log, status, Some(&error_code)).await;
             let (_, body) = from_app_error(error);
-            observe_gateway_metrics(
+            observe_gateway_metrics_with_daemon_node(
                 &state.metrics,
                 &context,
                 &public_model,
+                Some(node.id),
                 admission_usage,
                 status,
                 request_started_at.elapsed().as_millis() as u64,
@@ -892,6 +899,7 @@ async fn handle_daemon_chat_completion(
                     api_key_id: Some(identity.api_key_id),
                     provider_id: None,
                     route_id: None,
+                    daemon_node_id: Some(node.id),
                     model: public_model.clone(),
                     usage,
                     status_code: StatusCode::OK.as_u16(),
@@ -904,10 +912,11 @@ async fn handle_daemon_chat_completion(
                 let status = app_error_status_code(&error);
                 let error_code = error_code_from_app_error(&error);
                 let (_, body) = from_app_error(error);
-                observe_gateway_metrics(
+                observe_gateway_metrics_with_daemon_node(
                     &state.metrics,
                     &context,
                     &public_model,
+                    Some(node.id),
                     usage,
                     status,
                     latency_ms,
@@ -923,10 +932,11 @@ async fn handle_daemon_chat_completion(
                 return Ok(build_error_response(&context, status, body));
             }
 
-            observe_gateway_metrics(
+            observe_gateway_metrics_with_daemon_node(
                 &state.metrics,
                 &context,
                 &public_model,
+                Some(node.id),
                 usage,
                 StatusCode::OK,
                 latency_ms,
@@ -956,6 +966,7 @@ async fn handle_daemon_chat_completion(
                 request_started_at,
                 request_id,
                 identity.clone(),
+                Some(node.id),
                 &public_model,
                 &request_messages,
                 route_price,
@@ -972,6 +983,7 @@ async fn handle_daemon_chat_completion(
                 request_started_at,
                 request_id,
                 identity.clone(),
+                Some(node.id),
                 &public_model,
                 &request_messages,
                 route_price,
@@ -988,6 +1000,7 @@ async fn handle_daemon_chat_completion(
                 request_started_at,
                 request_id,
                 identity.clone(),
+                Some(node.id),
                 &public_model,
                 &request_messages,
                 route_price,
@@ -1009,6 +1022,7 @@ async fn daemon_error_response(
     request_started_at: Instant,
     request_id: Uuid,
     identity: ApiKeyIdentity,
+    daemon_node_id: Option<Uuid>,
     public_model: &str,
     request_messages: &[ChatMessage],
     route_price: RoutePrice,
@@ -1027,6 +1041,7 @@ async fn daemon_error_response(
             api_key_id: Some(identity.api_key_id),
             provider_id: None,
             route_id: None,
+            daemon_node_id,
             model: public_model.to_owned(),
             usage,
             status_code: status.as_u16(),
@@ -1042,10 +1057,11 @@ async fn daemon_error_response(
             "failed to persist daemon dispatch error usage"
         );
     }
-    observe_gateway_metrics(
+    observe_gateway_metrics_with_daemon_node(
         &state.metrics,
         context,
         public_model,
+        daemon_node_id,
         usage,
         status,
         latency_ms,
@@ -1063,6 +1079,7 @@ struct GatewayCompletionLog {
     request_started_at: Instant,
     route_alias: Option<String>,
     provider_alias: Option<String>,
+    daemon_node_id: Option<Uuid>,
 }
 
 impl GatewayCompletionLog {
@@ -1079,6 +1096,7 @@ impl GatewayCompletionLog {
             request_started_at,
             route_alias: None,
             provider_alias: None,
+            daemon_node_id: None,
         }
     }
 
@@ -1089,6 +1107,11 @@ impl GatewayCompletionLog {
 
     fn with_provider_alias(mut self, provider_alias: impl Into<String>) -> Self {
         self.provider_alias = Some(provider_alias.into());
+        self
+    }
+
+    fn with_daemon_node_id(mut self, daemon_node_id: Uuid) -> Self {
+        self.daemon_node_id = Some(daemon_node_id);
         self
     }
 
@@ -1115,6 +1138,7 @@ impl GatewayCompletionLog {
             api_key_id: self.context.api_key_id,
             provider_id: self.context.provider_id,
             route_id: self.context.route_id,
+            daemon_node_id: self.daemon_node_id,
             method: self
                 .context
                 .method
@@ -1202,6 +1226,29 @@ fn observe_gateway_metrics(
     latency_ms: u64,
     route_price: RoutePrice,
 ) {
+    observe_gateway_metrics_with_daemon_node(
+        metrics,
+        context,
+        route_alias,
+        None,
+        usage,
+        status,
+        latency_ms,
+        route_price,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn observe_gateway_metrics_with_daemon_node(
+    metrics: &MetricsRegistry,
+    context: &RequestContext,
+    route_alias: &str,
+    daemon_node_id: Option<Uuid>,
+    usage: mizan_providers::TokenUsage,
+    status: StatusCode,
+    latency_ms: u64,
+    route_price: RoutePrice,
+) {
     metrics.observe_gateway(GatewayObservation {
         route: context
             .route
@@ -1215,6 +1262,7 @@ fn observe_gateway_metrics(
             .model
             .clone()
             .unwrap_or_else(|| "unknown".to_string()),
+        daemon_node: daemon_node_id.map(|value| value.to_string()),
         status: status.as_u16(),
         usage,
         latency_ms,
@@ -1502,6 +1550,7 @@ fn build_stream_events(
                                     api_key_id: state.api_key_id,
                                     provider_id: Some(state.provider_id),
                                     route_id: Some(state.route_id),
+                                    daemon_node_id: None,
                                     model: state.model.clone(),
                                     usage,
                                     status_code: status.as_u16(),
@@ -1589,6 +1638,7 @@ fn build_stream_events(
                                 api_key_id: state.api_key_id,
                                 provider_id: Some(state.provider_id),
                                 route_id: Some(state.route_id),
+                                daemon_node_id: None,
                                 model: state.model.clone(),
                                 usage,
                                 status_code: StatusCode::OK.as_u16(),

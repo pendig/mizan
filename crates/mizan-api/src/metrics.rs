@@ -25,6 +25,7 @@ struct GatewayLabels {
     route: String,
     provider: String,
     model: String,
+    daemon_node: String,
     status: u16,
 }
 
@@ -33,6 +34,7 @@ pub struct GatewayObservation {
     pub route: String,
     pub provider: String,
     pub model: String,
+    pub daemon_node: Option<String>,
     pub status: u16,
     pub usage: TokenUsage,
     pub latency_ms: u64,
@@ -62,6 +64,7 @@ impl MetricsRegistry {
             route: normalize_label(observation.route),
             provider: normalize_label(observation.provider),
             model: normalize_label(observation.model),
+            daemon_node: normalize_optional_label(observation.daemon_node),
             status: observation.status,
         };
         let mut inner = self.shards[shard_index(&labels)]
@@ -97,7 +100,7 @@ impl MetricsRegistry {
         let stats = self.snapshot();
         let mut output = String::new();
 
-        output.push_str("# HELP mizan_gateway_requests_total Gateway requests by route, provider, model, and status.\n");
+        output.push_str("# HELP mizan_gateway_requests_total Gateway requests by route, provider, model, daemon node, and status.\n");
         output.push_str("# TYPE mizan_gateway_requests_total counter\n");
         for (labels, metrics) in &stats {
             output.push_str(&format!(
@@ -201,10 +204,11 @@ impl Default for MetricsRegistry {
 impl GatewayLabels {
     fn prometheus(&self) -> String {
         format!(
-            "route=\"{}\",provider=\"{}\",model=\"{}\",status=\"{}\"",
+            "route=\"{}\",provider=\"{}\",model=\"{}\",daemon_node=\"{}\",status=\"{}\"",
             escape_label(&self.route),
             escape_label(&self.provider),
             escape_label(&self.model),
+            escape_label(&self.daemon_node),
             self.status
         )
     }
@@ -237,11 +241,18 @@ fn normalize_label(value: String) -> String {
     }
 }
 
+fn normalize_optional_label(value: Option<String>) -> String {
+    value
+        .map(normalize_label)
+        .unwrap_or_else(|| "none".to_string())
+}
+
 fn shard_index(labels: &GatewayLabels) -> usize {
     let mut hash = FNV_OFFSET_BASIS;
     hash = fnv1a_len_prefixed(hash, labels.route.as_bytes());
     hash = fnv1a_len_prefixed(hash, labels.provider.as_bytes());
     hash = fnv1a_len_prefixed(hash, labels.model.as_bytes());
+    hash = fnv1a_len_prefixed(hash, labels.daemon_node.as_bytes());
     hash = fnv1a(hash, &labels.status.to_le_bytes());
     hash as usize % METRIC_SHARDS
 }
@@ -277,6 +288,7 @@ mod tests {
             route: "public-model".to_string(),
             provider: "openai".to_string(),
             model: "gpt-test".to_string(),
+            daemon_node: None,
             status: 200,
             usage: TokenUsage {
                 prompt_tokens: 10,
@@ -295,6 +307,7 @@ mod tests {
 
         assert!(rendered.contains("mizan_gateway_requests_total"));
         assert!(rendered.contains("route=\"public-model\""));
+        assert!(rendered.contains("daemon_node=\"none\""));
         assert!(rendered.contains("mizan_gateway_tokens_total"));
         assert!(rendered.contains("mizan_gateway_latency_ms_bucket"));
     }
@@ -317,6 +330,7 @@ mod tests {
             route: "public-model".to_string(),
             provider: "openai".to_string(),
             model: "gpt-test".to_string(),
+            daemon_node: Some("node-1".to_string()),
             status: 200,
             usage,
             latency_ms: 10,
@@ -326,6 +340,7 @@ mod tests {
             route: "public-model".to_string(),
             provider: "openai".to_string(),
             model: "gpt-test".to_string(),
+            daemon_node: Some("node-1".to_string()),
             status: 429,
             usage,
             latency_ms: 10,
@@ -335,10 +350,10 @@ mod tests {
         let rendered = registry.render_prometheus();
 
         assert!(rendered.contains(
-            "mizan_gateway_credits_charged_total{route=\"public-model\",provider=\"openai\",model=\"gpt-test\",status=\"200\"} 2"
+            "mizan_gateway_credits_charged_total{route=\"public-model\",provider=\"openai\",model=\"gpt-test\",daemon_node=\"node-1\",status=\"200\"} 2"
         ));
         assert!(rendered.contains(
-            "mizan_gateway_credits_charged_total{route=\"public-model\",provider=\"openai\",model=\"gpt-test\",status=\"429\"} 0"
+            "mizan_gateway_credits_charged_total{route=\"public-model\",provider=\"openai\",model=\"gpt-test\",daemon_node=\"node-1\",status=\"429\"} 0"
         ));
     }
 
@@ -349,6 +364,7 @@ mod tests {
             route: "bad\nroute".to_string(),
             provider: "provider\"quote".to_string(),
             model: "model\\slash".to_string(),
+            daemon_node: Some("node\\id".to_string()),
             status: 200,
             usage: TokenUsage {
                 prompt_tokens: 0,
@@ -368,6 +384,7 @@ mod tests {
         assert!(rendered.contains("route=\"bad\\nroute\""));
         assert!(rendered.contains("provider=\"provider\\\"quote\""));
         assert!(rendered.contains("model=\"model\\\\slash\""));
+        assert!(rendered.contains("daemon_node=\"node\\\\id\""));
     }
 
     #[test]
@@ -383,6 +400,7 @@ mod tests {
                         route: "public-model".to_string(),
                         provider: "openai".to_string(),
                         model: "gpt-test".to_string(),
+                        daemon_node: None,
                         status: 200,
                         usage: TokenUsage {
                             prompt_tokens: 1,
@@ -407,10 +425,10 @@ mod tests {
         let rendered = registry.render_prometheus();
 
         assert!(rendered.contains(
-            "mizan_gateway_requests_total{route=\"public-model\",provider=\"openai\",model=\"gpt-test\",status=\"200\"} 800"
+            "mizan_gateway_requests_total{route=\"public-model\",provider=\"openai\",model=\"gpt-test\",daemon_node=\"none\",status=\"200\"} 800"
         ));
         assert!(rendered.contains(
-            "mizan_gateway_tokens_total{route=\"public-model\",provider=\"openai\",model=\"gpt-test\",status=\"200\"} 1600"
+            "mizan_gateway_tokens_total{route=\"public-model\",provider=\"openai\",model=\"gpt-test\",daemon_node=\"none\",status=\"200\"} 1600"
         ));
     }
 }
