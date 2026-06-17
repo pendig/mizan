@@ -37,6 +37,7 @@ pub struct RequestLogInput {
     pub api_key_id: Option<Uuid>,
     pub provider_id: Option<Uuid>,
     pub route_id: Option<Uuid>,
+    pub daemon_node_id: Option<Uuid>,
     pub method: String,
     pub path: String,
     pub route: Option<String>,
@@ -79,6 +80,7 @@ pub async fn record_request_log(
     let api_key_id = input.api_key_id.map(UuidText::new);
     let provider_id = input.provider_id.map(UuidText::new);
     let route_id = input.route_id.map(UuidText::new);
+    let daemon_node_id = input.daemon_node_id.map(UuidText::new);
 
     query(&prepare_sql(
         database_backend,
@@ -89,6 +91,7 @@ pub async fn record_request_log(
             api_key_id,
             provider_id,
             route_id,
+            daemon_node_id,
             method,
             path,
             route,
@@ -97,7 +100,7 @@ pub async fn record_request_log(
             latency_ms,
             error_code,
             created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     ))
     .bind(id.as_str())
     .bind(request_id.as_str())
@@ -105,6 +108,7 @@ pub async fn record_request_log(
     .bind(api_key_id.as_ref().map(UuidText::as_str))
     .bind(provider_id.as_ref().map(UuidText::as_str))
     .bind(route_id.as_ref().map(UuidText::as_str))
+    .bind(daemon_node_id.as_ref().map(UuidText::as_str))
     .bind(&input.method)
     .bind(&input.path)
     .bind(input.route.as_ref())
@@ -194,6 +198,7 @@ mod tests {
                 api_key_id: None,
                 provider_id: None,
                 route_id: None,
+                daemon_node_id: None,
                 method: "POST".to_owned(),
                 path: "/v1/chat/completions".to_owned(),
                 route: Some("mizan/gpt-4o-mini".to_owned()),

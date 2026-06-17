@@ -42,6 +42,8 @@ pub struct UsageEventResponse {
     pub api_key_id: Option<Uuid>,
     pub provider_id: Option<Uuid>,
     pub route_id: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub daemon_node_id: Option<Uuid>,
     pub model: String,
     pub usage_prompt_tokens: u64,
     pub usage_completion_tokens: u64,
@@ -66,6 +68,10 @@ pub struct UsageQuery {
 #[derive(Debug, Deserialize)]
 pub struct AdminUsageQuery {
     pub user_id: Option<Uuid>,
+    pub daemon_node_id: Option<Uuid>,
+    pub host_user_id: Option<Uuid>,
+    pub created_after: Option<String>,
+    pub created_before: Option<String>,
     pub limit: Option<i64>,
     pub offset: Option<i64>,
 }
@@ -92,6 +98,7 @@ pub struct BillingInput {
     pub api_key_id: Option<Uuid>,
     pub provider_id: Option<Uuid>,
     pub route_id: Option<Uuid>,
+    pub daemon_node_id: Option<Uuid>,
     pub model: String,
     pub usage: TokenUsage,
     pub status_code: u16,
@@ -139,9 +146,13 @@ pub async fn list_usage(
     let rows = list_usage_events(
         &state.database,
         state.database_backend(),
-        Some(identity.user_id),
-        query.limit,
-        query.offset,
+        UsageEventFilters {
+            user_id: Some(identity.user_id),
+            include_daemon_node_id: false,
+            limit: query.limit,
+            offset: query.offset,
+            ..UsageEventFilters::default()
+        },
     )
     .await
     .map_err(from_app_error)?;
@@ -156,9 +167,16 @@ pub async fn list_usage_admin(
     let rows = list_usage_events(
         &state.database,
         state.database_backend(),
-        query.user_id,
-        query.limit,
-        query.offset,
+        UsageEventFilters {
+            user_id: query.user_id,
+            daemon_node_id: query.daemon_node_id,
+            host_user_id: query.host_user_id,
+            created_after: query.created_after,
+            created_before: query.created_before,
+            include_daemon_node_id: true,
+            limit: query.limit,
+            offset: query.offset,
+        },
     )
     .await
     .map_err(from_app_error)?;
@@ -451,12 +469,11 @@ fn to_u64(value: i64) -> AppResult<u64> {
 async fn list_usage_events(
     database: &AnyPool,
     database_backend: DatabaseBackend,
-    user_id_filter: Option<Uuid>,
-    limit: Option<i64>,
-    offset: Option<i64>,
+    filters: UsageEventFilters,
 ) -> AppResult<Vec<UsageEventResponse>> {
-    let limit = normalize_limit(limit)?;
-    let offset = normalize_offset(offset);
+    let limit = normalize_limit(filters.limit)?;
+    let offset = normalize_offset(filters.offset);
+    let include_daemon_node_id = filters.include_daemon_node_id;
 
     #[derive(Debug, FromRow)]
     struct UsageEventRow {
@@ -466,6 +483,7 @@ async fn list_usage_events(
         api_key_id: Option<String>,
         provider_id: Option<String>,
         route_id: Option<String>,
+        daemon_node_id: Option<String>,
         model: String,
         usage_prompt_tokens: i64,
         usage_completion_tokens: i64,
@@ -476,27 +494,61 @@ async fn list_usage_events(
         created_at: String,
     }
 
-    let sql = if user_id_filter.is_some() {
-        "SELECT id, request_id, user_id, api_key_id, provider_id, route_id, model, \
-             usage_prompt_tokens, usage_completion_tokens, usage_total_tokens, usage_estimated, \
-             status_code, latency_ms, created_at \
-             FROM usage_events \
-             WHERE user_id = ? \
-             ORDER BY created_at DESC \
-             LIMIT ? OFFSET ?"
-    } else {
-        "SELECT id, request_id, user_id, api_key_id, provider_id, route_id, model, \
-             usage_prompt_tokens, usage_completion_tokens, usage_total_tokens, usage_estimated, \
-             status_code, latency_ms, created_at \
-             FROM usage_events \
-             ORDER BY created_at DESC \
-             LIMIT ? OFFSET ?"
-    };
+    let mut sql = String::from(
+        "SELECT usage_events.id,
+                usage_events.request_id,
+                usage_events.user_id,
+                usage_events.api_key_id,
+                usage_events.provider_id,
+                usage_events.route_id,
+                usage_events.daemon_node_id,
+                usage_events.model,
+                usage_events.usage_prompt_tokens,
+                usage_events.usage_completion_tokens,
+                usage_events.usage_total_tokens,
+                usage_events.usage_estimated,
+                usage_events.status_code,
+                usage_events.latency_ms,
+                usage_events.created_at
+         FROM usage_events",
+    );
+    if filters.host_user_id.is_some() {
+        sql.push_str(" INNER JOIN daemon_nodes ON usage_events.daemon_node_id = daemon_nodes.id");
+    }
+    sql.push_str(" WHERE 1 = 1");
+    if filters.user_id.is_some() {
+        sql.push_str(" AND usage_events.user_id = ?");
+    }
+    if filters.daemon_node_id.is_some() {
+        sql.push_str(" AND usage_events.daemon_node_id = ?");
+    }
+    if filters.host_user_id.is_some() {
+        sql.push_str(" AND daemon_nodes.host_user_id = ?");
+    }
+    if filters.created_after.is_some() {
+        sql.push_str(" AND usage_events.created_at >= ?");
+    }
+    if filters.created_before.is_some() {
+        sql.push_str(" AND usage_events.created_at <= ?");
+    }
+    sql.push_str(" ORDER BY usage_events.created_at DESC LIMIT ? OFFSET ?");
 
-    let prepared_sql = prepare_sql(database_backend, sql);
+    let prepared_sql = prepare_sql(database_backend, &sql);
     let mut query = query_as::<_, UsageEventRow>(&prepared_sql);
-    if let Some(user_id) = user_id_filter {
+    if let Some(user_id) = filters.user_id {
         query = query.bind(user_id.to_string());
+    }
+    if let Some(daemon_node_id) = filters.daemon_node_id {
+        query = query.bind(daemon_node_id.to_string());
+    }
+    if let Some(host_user_id) = filters.host_user_id {
+        query = query.bind(host_user_id.to_string());
+    }
+    if let Some(created_after) = filters.created_after {
+        query = query.bind(created_after);
+    }
+    if let Some(created_before) = filters.created_before {
+        query = query.bind(created_before);
     }
 
     let rows = query
@@ -519,6 +571,11 @@ async fn list_usage_events(
                 api_key_id: parse_optional_uuid(row.api_key_id.as_ref())?,
                 provider_id: parse_optional_uuid(row.provider_id.as_ref())?,
                 route_id: parse_optional_uuid(row.route_id.as_ref())?,
+                daemon_node_id: if include_daemon_node_id {
+                    parse_optional_uuid(row.daemon_node_id.as_ref())?
+                } else {
+                    None
+                },
                 model: row.model,
                 usage_prompt_tokens: to_u64(row.usage_prompt_tokens)?,
                 usage_completion_tokens: to_u64(row.usage_completion_tokens)?,
@@ -530,6 +587,18 @@ async fn list_usage_events(
             })
         })
         .collect::<AppResult<Vec<_>>>()
+}
+
+#[derive(Debug, Default)]
+struct UsageEventFilters {
+    user_id: Option<Uuid>,
+    daemon_node_id: Option<Uuid>,
+    host_user_id: Option<Uuid>,
+    created_after: Option<String>,
+    created_before: Option<String>,
+    include_daemon_node_id: bool,
+    limit: Option<i64>,
+    offset: Option<i64>,
 }
 
 async fn ensure_wallet(
@@ -642,6 +711,7 @@ async fn insert_usage_event(
             api_key_id,
             provider_id,
             route_id,
+            daemon_node_id,
             model,
             usage_prompt_tokens,
             usage_completion_tokens,
@@ -650,7 +720,7 @@ async fn insert_usage_event(
             status_code,
             latency_ms,
             created_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     ))
     .bind(Uuid::now_v7().to_string())
     .bind(input.request_id.to_string())
@@ -658,6 +728,7 @@ async fn insert_usage_event(
     .bind(input.api_key_id.map(|value| value.to_string()))
     .bind(input.provider_id.map(|value| value.to_string()))
     .bind(input.route_id.map(|value| value.to_string()))
+    .bind(input.daemon_node_id.map(|value| value.to_string()))
     .bind(&input.model)
     .bind(i64::try_from(input.usage.prompt_tokens).map_err(|_| {
         AppError::invalid_config("usage.prompt_tokens", "prompt tokens must fit into i64")
@@ -709,6 +780,7 @@ async fn insert_usage_event_tx(
             api_key_id,
             provider_id,
             route_id,
+            daemon_node_id,
             model,
             usage_prompt_tokens,
             usage_completion_tokens,
@@ -717,7 +789,7 @@ async fn insert_usage_event_tx(
             status_code,
             latency_ms,
             created_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     ))
     .bind(Uuid::now_v7().to_string())
     .bind(input.request_id.to_string())
@@ -725,6 +797,7 @@ async fn insert_usage_event_tx(
     .bind(input.api_key_id.map(|value| value.to_string()))
     .bind(input.provider_id.map(|value| value.to_string()))
     .bind(input.route_id.map(|value| value.to_string()))
+    .bind(input.daemon_node_id.map(|value| value.to_string()))
     .bind(&input.model)
     .bind(i64::try_from(input.usage.prompt_tokens).map_err(|_| {
         AppError::invalid_config("usage.prompt_tokens", "prompt tokens must fit into i64")
@@ -756,6 +829,134 @@ async fn insert_usage_event_tx(
     })?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod usage_tracing_tests {
+    use super::*;
+    use crate::storage;
+
+    async fn test_database() -> AnyPool {
+        storage::connect_and_migrate("sqlite::memory:", true, 1)
+            .await
+            .expect("create memory sqlite")
+    }
+
+    async fn seed_user(database: &AnyPool, email_prefix: &str) -> Uuid {
+        let id = Uuid::now_v7();
+        let now = unix_timestamp_string();
+        query(&prepare_sql(
+            DatabaseBackend::Sqlite,
+            "INSERT INTO users (id, email, password_hash, role, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?)",
+        ))
+        .bind(id.to_string())
+        .bind(format!("{email_prefix}-{id}@example.test"))
+        .bind("hash")
+        .bind("member")
+        .bind(&now)
+        .bind(&now)
+        .execute(database)
+        .await
+        .expect("insert user");
+        id
+    }
+
+    async fn seed_daemon_node(database: &AnyPool, host_user_id: Uuid) -> Uuid {
+        let id = Uuid::now_v7();
+        let now = unix_timestamp_string();
+        query(&prepare_sql(
+            DatabaseBackend::Sqlite,
+            "INSERT INTO daemon_nodes (
+                 id, host_user_id, token_hash, status, revoked, created_at, updated_at
+             ) VALUES (?, ?, ?, ?, 0, ?, ?)",
+        ))
+        .bind(id.to_string())
+        .bind(host_user_id.to_string())
+        .bind(format!("hash-{id}"))
+        .bind("active")
+        .bind(&now)
+        .bind(&now)
+        .execute(database)
+        .await
+        .expect("insert daemon node");
+        id
+    }
+
+    async fn seed_usage(database: &AnyPool, user_id: Uuid, daemon_node_id: Uuid, model: &str) {
+        insert_usage_event(
+            database,
+            DatabaseBackend::Sqlite,
+            &BillingInput {
+                request_id: Uuid::now_v7(),
+                user_id,
+                api_key_id: None,
+                provider_id: None,
+                route_id: None,
+                daemon_node_id: Some(daemon_node_id),
+                model: model.to_owned(),
+                usage: TokenUsage {
+                    prompt_tokens: 3,
+                    completion_tokens: 4,
+                    total_tokens: 7,
+                    estimated: false,
+                },
+                status_code: StatusCode::OK.as_u16(),
+                latency_ms: 42,
+                route_price: RoutePrice {
+                    input_microcredits_per_1m_tokens: 0,
+                    output_microcredits_per_1m_tokens: 0,
+                },
+            },
+            StatusCode::OK.as_u16(),
+        )
+        .await
+        .expect("insert usage");
+    }
+
+    #[tokio::test]
+    async fn user_usage_hides_daemon_node_metadata_but_admin_can_filter_by_host() {
+        let database = test_database().await;
+        let host_a = seed_user(&database, "host-a").await;
+        let host_b = seed_user(&database, "host-b").await;
+        let user_a = seed_user(&database, "user-a").await;
+        let user_b = seed_user(&database, "user-b").await;
+        let node_a = seed_daemon_node(&database, host_a).await;
+        let node_b = seed_daemon_node(&database, host_b).await;
+
+        seed_usage(&database, user_a, node_a, "llama3.1").await;
+        seed_usage(&database, user_b, node_b, "qwen2.5-coder").await;
+
+        let user_rows = list_usage_events(
+            &database,
+            DatabaseBackend::Sqlite,
+            UsageEventFilters {
+                user_id: Some(user_a),
+                include_daemon_node_id: false,
+                ..UsageEventFilters::default()
+            },
+        )
+        .await
+        .expect("list user usage");
+        assert_eq!(user_rows.len(), 1);
+        assert_eq!(user_rows[0].model, "llama3.1");
+        assert_eq!(user_rows[0].daemon_node_id, None);
+
+        let host_rows = list_usage_events(
+            &database,
+            DatabaseBackend::Sqlite,
+            UsageEventFilters {
+                host_user_id: Some(host_a),
+                include_daemon_node_id: true,
+                ..UsageEventFilters::default()
+            },
+        )
+        .await
+        .expect("list host usage");
+        assert_eq!(host_rows.len(), 1);
+        assert_eq!(host_rows[0].model, "llama3.1");
+        assert_eq!(host_rows[0].daemon_node_id, Some(node_a));
+    }
 }
 
 fn ceil_divide(dividend: u64, divisor: u64) -> u64 {
