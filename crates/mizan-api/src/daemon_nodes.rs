@@ -17,8 +17,8 @@ use crate::AppState;
 use crate::auth::ApiKeyIdentity;
 use crate::logging::{AdminAuditInput, record_admin_audit, serialize_payload};
 use crate::utils::{
-    from_app_error, is_enabled, is_unique_constraint_error, now_utc_epoch_seconds, prepare_sql,
-    unix_timestamp_string,
+    from_app_error, is_enabled, is_unique_constraint_error, now_utc_epoch_seconds, parse_timestamp,
+    prepare_sql, unix_timestamp_string,
 };
 
 type DaemonNodeHttpResult<T> = Result<T, (StatusCode, Json<ErrorEnvelope>)>;
@@ -631,12 +631,12 @@ fn compute_daemon_signature(
         .collect::<String>()
 }
 
-fn header_value(
-    headers: &axum::http::HeaderMap,
+fn header_value<'a>(
+    headers: &'a axum::http::HeaderMap,
     key: &'static str,
     status: StatusCode,
     error: AppError,
-) -> DaemonNodeHttpResult<&str> {
+) -> DaemonNodeHttpResult<&'a str> {
     headers
         .get(key)
         .and_then(|value| value.to_str().ok())

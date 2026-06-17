@@ -233,7 +233,7 @@ async fn register(args: ConfigArgs) -> AppResult<()> {
 
     let response = client
         .post(&registration_url)
-        .then_sign(token, "POST", "/daemon/register")
+        .then_sign(&token, "POST", "/daemon/register")
         .bearer_auth(&token)
         .json(&DaemonRegistrationRequest {
             hostname: std::env::var("HOSTNAME")
