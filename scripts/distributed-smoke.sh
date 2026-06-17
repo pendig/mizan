@@ -13,6 +13,8 @@ fi
 BASE_URL="${MIZAN_BASE_URL:-http://127.0.0.1:${API_PORT}}"
 MOCK_URL="${MIZAN_MOCK_BASE_URL:-http://127.0.0.1:${MOCK_PORT}}"
 WAIT_SECONDS="${MIZAN_DISTRIBUTED_WAIT_SECONDS:-600}"
+REDIS_URL="${REDIS_URL:-redis://127.0.0.1:6379/}"
+DAEMON_REGISTER_RETRIES="${MIZAN_DAEMON_REGISTER_RETRIES:-30}"
 ADMIN_EMAIL="${MIZAN_ADMIN_EMAIL:-admin+mizan-distributed@mizan.local}"
 ADMIN_PASSWORD="${MIZAN_ADMIN_PASSWORD:-change-me-distributed}"
 USER_EMAIL="${MIZAN_SMOKE_EMAIL:-mizan-user-$(date +%s)@example.test}"
@@ -150,16 +152,66 @@ assert_metrics_has_daemon_node() {
   printf '%s' "${metrics_payload}" | grep -Eq 'daemon_node="[0-9a-f]{8}-[0-9a-f-]{27}"' || return 1
 }
 
+wait_for_redis() {
+  local redis_url="$1"
+
+  if ! command -v redis-cli >/dev/null 2>&1; then
+    echo "redis-cli not found while checking ${redis_url}; please install redis-cli or disable this check." >&2
+    return 1
+  fi
+
+  for _ in $(seq 1 "${WAIT_SECONDS}"); do
+    if redis-cli -u "${redis_url}" ping >/dev/null 2>&1; then
+      echo "Redis reachable at ${redis_url}"
+      return 0
+    fi
+    sleep 1
+  done
+
+  echo "Redis is not reachable at ${redis_url}" >&2
+  return 1
+}
+
+register_daemon_with_retry() {
+  local daemon_config="$1"
+  local attempt
+
+  for attempt in $(seq 1 "${DAEMON_REGISTER_RETRIES}"); do
+    local output
+    local status=0
+
+    echo "Registering daemon with control plane (attempt ${attempt}/${DAEMON_REGISTER_RETRIES})"
+    set +e
+    output="$(cargo run -p mizan-daemon -- register --config "${daemon_config}" 2>&1)"
+    status=$?
+    set -e
+
+    if [[ "${status}" -eq 0 ]]; then
+      echo "Daemon registered successfully"
+      return 0
+    fi
+
+    echo "Daemon register failed with exit code ${status}" >&2
+    printf '%s\n' "${output}" >&2
+    sleep 1
+  done
+
+  return 1
+}
+
 echo "Starting mock upstream on ${MOCK_URL}"
 python3 scripts/mock-openai.py --port "${MOCK_PORT}" &
 MOCK_PID="$!"
 wait_for "${MOCK_URL}/v1/models"
 
+echo "Checking Redis connectivity at ${REDIS_URL}"
+wait_for_redis "${REDIS_URL}"
+
 echo "Starting mizan-api on ${BASE_URL}"
 mkdir -p "${WORK_DIR}"
 MIZAN_HTTP_ADDR="127.0.0.1:${API_PORT}" \
 DATABASE_URL="sqlite://${WORK_DIR}/mizan-distributed.sqlite3?mode=rwc" \
-REDIS_URL="${REDIS_URL:-redis://127.0.0.1:6379/}" \
+REDIS_URL="${REDIS_URL}" \
 MIZAN_PROVIDER_SECRET_KEY="${MIZAN_PROVIDER_SECRET_KEY:-dist-provider-secret}" \
 MIZAN_ADMIN_EMAIL="${ADMIN_EMAIL}" \
 MIZAN_ADMIN_PASSWORD="${ADMIN_PASSWORD}" \
@@ -201,8 +253,7 @@ health_addr = "127.0.0.1:19180"
 heartbeat_interval_seconds = 2
 EOF_CFG
 
-echo "Registering daemon with control plane"
-cargo run -p mizan-daemon -- register --config "${daemon_config}"
+register_daemon_with_retry "${daemon_config}"
 
 echo "Starting daemon"
 cargo run -p mizan-daemon -- run --config "${daemon_config}" >/tmp/mizan-daemon-distributed.log 2>&1 &
