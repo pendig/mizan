@@ -1,9 +1,14 @@
 use axum::Json;
 use axum::body::Body;
 use axum::extract::{Extension, Path, State};
-use axum::http::{Request, StatusCode, header::AUTHORIZATION};
+use axum::http::{
+    Request,
+    StatusCode,
+    header::{AUTHORIZATION},
+};
 use axum::middleware::Next;
 use axum::response::Response;
+use std::collections::HashMap;
 use mizan_core::{AppError, DatabaseBackend, ErrorEnvelope};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -27,6 +32,10 @@ const STATUS_PENDING: &str = "pending";
 pub(crate) const STATUS_ACTIVE: &str = "active";
 const STATUS_REVOKED: &str = "revoked";
 pub(crate) const HEALTH_STATUS_HEALTHY: &str = "healthy";
+const DAEMON_SIGNATURE_TTL_SECONDS: i64 = 300;
+const DAEMON_SIGNATURE_HEADER: &str = "x-mizan-daemon-signature";
+const DAEMON_SIGNATURE_NONCE_HEADER: &str = "x-mizan-daemon-nonce";
+const DAEMON_SIGNATURE_TIMESTAMP_HEADER: &str = "x-mizan-daemon-timestamp";
 const AUDIT_ACTION_CREATE_DAEMON_NODE: &str = "daemon_node_created";
 const AUDIT_ACTION_REVOKE_DAEMON_NODE: &str = "daemon_node_revoked";
 const AUDIT_ENTITY_DAEMON_NODE: &str = "daemon_node";
@@ -162,6 +171,7 @@ pub struct EligibleDaemonNode {
 pub struct DaemonNodeIdentity {
     pub node_id: Uuid,
     pub status: String,
+    pub token_hash: String,
 }
 
 #[derive(Debug, FromRow)]
@@ -442,6 +452,14 @@ pub async fn daemon_node_auth(
         resolve_daemon_node_identity(&state.database, state.database_backend(), authorization)
             .instrument(info_span!("daemon_node_auth"))
             .await?;
+    validate_daemon_request_signature(
+        &state,
+        request.method().as_str(),
+        request.uri().path_and_query().map(|value| value.as_str()).unwrap_or("/"),
+        request.headers(),
+        &identity,
+    )
+    .await?;
     request.extensions_mut().insert(identity);
     Ok(next.run(request).await)
 }
@@ -479,9 +497,9 @@ async fn resolve_daemon_node_identity(
         .ok_or_else(|| map_error(StatusCode::UNAUTHORIZED, AppError::Unauthorized))?;
     let token_hash = hash_value(token);
 
-    let row = query_as::<_, (String, String)>(&prepare_sql(
+    let row = query_as::<_, (String, String, String)>(&prepare_sql(
         database_backend,
-        "SELECT id, status
+        "SELECT id, status, token_hash
          FROM daemon_nodes
          WHERE token_hash = ? AND revoked = 0 AND status != ?",
     ))
@@ -507,7 +525,129 @@ async fn resolve_daemon_node_identity(
     Ok(DaemonNodeIdentity {
         node_id,
         status: row.1,
+        token_hash: row.2,
     })
+}
+
+async fn validate_daemon_request_signature(
+    state: &AppState,
+    method: &str,
+    path: &str,
+    headers: &axum::http::HeaderMap,
+    identity: &DaemonNodeIdentity,
+) -> DaemonNodeHttpResult<()> {
+    let timestamp_raw = header_value(
+        headers,
+        DAEMON_SIGNATURE_TIMESTAMP_HEADER,
+        StatusCode::UNAUTHORIZED,
+        AppError::Unauthorized,
+    )?;
+    let nonce = header_value(
+        headers,
+        DAEMON_SIGNATURE_NONCE_HEADER,
+        StatusCode::UNAUTHORIZED,
+        AppError::Unauthorized,
+    )?;
+    let signature = header_value(
+        headers,
+        DAEMON_SIGNATURE_HEADER,
+        StatusCode::UNAUTHORIZED,
+        AppError::Unauthorized,
+    )?;
+
+    let timestamp = parse_timestamp(timestamp_raw).map_err(|error| {
+        map_error(
+            StatusCode::UNAUTHORIZED,
+            AppError::invalid_config(DAEMON_SIGNATURE_TIMESTAMP_HEADER, error.to_string()),
+        )
+    })?;
+    let now = now_utc_epoch_seconds();
+    if (now - timestamp).abs() > DAEMON_SIGNATURE_TTL_SECONDS {
+        return Err(map_error(StatusCode::UNAUTHORIZED, AppError::Unauthorized));
+    }
+
+    if !verify_daemon_signature(
+        &identity.token_hash,
+        method,
+        path,
+        timestamp,
+        nonce,
+        signature,
+    ) {
+        return Err(map_error(StatusCode::UNAUTHORIZED, AppError::Unauthorized));
+    }
+
+    let mut nonces = state.daemon_signature_nonce_cache.write().await;
+    prune_stale_nonces(&mut nonces, now);
+    let nonce_key = format!("{}::{nonce}", identity.node_id);
+
+    if nonces.contains_key(&nonce_key) {
+        return Err(map_error(StatusCode::UNAUTHORIZED, AppError::Unauthorized));
+    }
+
+    nonces.insert(nonce_key, now);
+    Ok(())
+}
+
+fn prune_stale_nonces(nonces: &mut HashMap<String, i64>, now: i64) {
+    nonces.retain(|_, seen_at| now.saturating_sub(*seen_at) <= DAEMON_SIGNATURE_TTL_SECONDS);
+}
+
+fn verify_daemon_signature(
+    token_hash: &str,
+    method: &str,
+    path: &str,
+    timestamp: i64,
+    nonce: &str,
+    signature: &str,
+) -> bool {
+    secure_eq(
+        &compute_daemon_signature(token_hash, method, path, timestamp, nonce),
+        signature,
+    )
+}
+
+fn compute_daemon_signature(
+    token_hash: &str,
+    method: &str,
+    path: &str,
+    timestamp: i64,
+    nonce: &str,
+) -> String {
+    let mut digest = Sha256::new();
+    digest.update(token_hash);
+    digest.update("|");
+    digest.update(method.as_bytes());
+    digest.update("|");
+    digest.update(path.as_bytes());
+    digest.update("|");
+    digest.update(timestamp.to_string().as_bytes());
+    digest.update("|");
+    digest.update(nonce);
+    digest
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>()
+}
+
+fn header_value(
+    headers: &axum::http::HeaderMap,
+    key: &'static str,
+    status: StatusCode,
+    error: AppError,
+) -> DaemonNodeHttpResult<&str> {
+    headers
+        .get(key)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .map(|value| Ok(value))
+        .unwrap_or_else(|| Err(map_error(status, error)))
+}
+
+fn secure_eq(left: &str, right: &str) -> bool {
+    left.len() == right.len() && left.bytes().zip(right.bytes()).all(|(l, r)| l == r)
 }
 
 async fn mark_node_seen(
@@ -1108,6 +1248,29 @@ mod tests {
         .expect_err("revoked node should fail");
 
         assert_eq!(error.0, StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn verifies_request_signature_matches_expected_payload() {
+        let secret = hash_value("mizan_sk_daemon_signing");
+        let signature = compute_daemon_signature(&secret, "POST", "/daemon/heartbeat", 1712345678, "n-123");
+
+        assert!(verify_daemon_signature(
+            &secret,
+            "POST",
+            "/daemon/heartbeat",
+            1712345678,
+            "n-123",
+            &signature
+        ));
+        assert!(!verify_daemon_signature(
+            &secret,
+            "POST",
+            "/daemon/heartbeat",
+            1712345678,
+            "n-456",
+            &signature
+        ));
     }
 
     async fn insert_selectable_node(

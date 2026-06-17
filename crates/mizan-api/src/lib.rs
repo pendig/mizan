@@ -11,8 +11,11 @@ use mizan_gateway::Gateway;
 use redis::Client as RedisClient;
 use serde::Serialize;
 use sqlx::{AnyPool, query_scalar};
+use std::collections::HashMap;
+use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::task;
+use tokio::sync::RwLock;
 use tower_http::trace::TraceLayer;
 use tracing::{info, warn};
 
@@ -34,6 +37,7 @@ pub struct AppState {
     pub database: AnyPool,
     pub redis: RedisClient,
     pub metrics: metrics::MetricsRegistry,
+    pub daemon_signature_nonce_cache: Arc<RwLock<HashMap<String, i64>>>,
 }
 
 impl AppState {
@@ -54,6 +58,7 @@ impl AppState {
             database,
             redis,
             metrics: metrics::MetricsRegistry::default(),
+            daemon_signature_nonce_cache: Arc::new(RwLock::new(HashMap::new())),
         };
 
         if let (Some(email), Some(password)) = (

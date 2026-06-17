@@ -3,14 +3,20 @@ use std::{net::SocketAddr, path::PathBuf, process, time::Duration};
 use clap::{Args, CommandFactory, Parser, Subcommand};
 use mizan_core::{AppError, AppResult, RequestContextBuilder, init_tracing, redact_for_logs};
 use mizan_providers::{ChatRequest, ChatResponse, OpenAiCompatibleProvider, ProviderAdapter};
+use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use tokio::{
     net::TcpStream,
     time::{sleep, timeout},
 };
 use tracing::{info, warn};
 use uuid::Uuid;
+
+const DAEMON_SIGNATURE_HEADER: &str = "x-mizan-daemon-signature";
+const DAEMON_SIGNATURE_TIMESTAMP_HEADER: &str = "x-mizan-daemon-timestamp";
+const DAEMON_SIGNATURE_NONCE_HEADER: &str = "x-mizan-daemon-nonce";
 
 #[tokio::main]
 async fn main() {
@@ -119,6 +125,7 @@ async fn lease_and_run_one_job(
     let lease_url = control_plane_endpoint(&config.control_plane_url, "/daemon/jobs/lease");
     let lease_response = client
         .post(&lease_url)
+        .then_sign(token, "POST", "/daemon/jobs/lease")
         .bearer_auth(token)
         .send()
         .await
@@ -159,6 +166,7 @@ async fn lease_and_run_one_job(
     );
     let complete_response = client
         .post(&complete_url)
+        .then_sign(token, "POST", &format!("/daemon/jobs/{}/complete", job.id))
         .bearer_auth(token)
         .json(&completion)
         .send()
@@ -225,6 +233,7 @@ async fn register(args: ConfigArgs) -> AppResult<()> {
 
     let response = client
         .post(&registration_url)
+        .then_sign(token, "POST", "/daemon/register")
         .bearer_auth(&token)
         .json(&DaemonRegistrationRequest {
             hostname: std::env::var("HOSTNAME")
@@ -285,6 +294,7 @@ async fn send_heartbeat(
 ) -> AppResult<DaemonHeartbeatResponse> {
     let response = client
         .post(heartbeat_url)
+        .then_sign(token, "POST", "/daemon/heartbeat")
         .bearer_auth(token)
         .json(&DaemonHeartbeatRequest {
             hostname: std::env::var("HOSTNAME")
@@ -324,10 +334,69 @@ fn read_daemon_token(config: &DaemonConfig) -> AppResult<String> {
 }
 
 fn daemon_http_client() -> AppResult<reqwest::Client> {
-    reqwest::Client::builder()
+    Client::builder()
         .timeout(Duration::from_secs(30))
         .build()
         .map_err(|error| AppError::infrastructure(format!("daemon http client failed: {error}")))
+}
+
+fn now_utc_timestamp_seconds() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_secs() as i64)
+}
+
+fn hash_token(token: &str) -> String {
+    let mut digest = Sha256::new();
+    digest.update(token.as_bytes());
+    digest
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>()
+}
+
+fn compute_request_signature(
+    token_hash: &str,
+    method: &str,
+    path: &str,
+    timestamp: i64,
+    nonce: &str,
+) -> String {
+    let mut digest = Sha256::new();
+    digest.update(token_hash);
+    digest.update("|");
+    digest.update(method.as_bytes());
+    digest.update("|");
+    digest.update(path.as_bytes());
+    digest.update("|");
+    digest.update(timestamp.to_string().as_bytes());
+    digest.update("|");
+    digest.update(nonce);
+    digest
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>()
+}
+
+trait SignedRequest {
+    fn then_sign(self, token: &str, method: &str, path: &str) -> Self;
+}
+
+impl SignedRequest for reqwest::RequestBuilder {
+    fn then_sign(self, token: &str, method: &str, path: &str) -> Self {
+        let token_hash = hash_token(token);
+        let timestamp = now_utc_timestamp_seconds();
+        let nonce = Uuid::new_v4().to_string();
+        let signature = compute_request_signature(&token_hash, method, path, timestamp, &nonce);
+
+        self.header(DAEMON_SIGNATURE_TIMESTAMP_HEADER, timestamp.to_string())
+            .header(DAEMON_SIGNATURE_NONCE_HEADER, nonce)
+            .header(DAEMON_SIGNATURE_HEADER, signature)
+    }
 }
 
 async fn health(args: HealthArgs) -> AppResult<()> {
@@ -703,6 +772,16 @@ heartbeat_interval_seconds = 15
             redact_for_logs(input),
             "daemon_token=[REDACTED] bearer=[REDACTED] abc"
         );
+    }
+
+    #[test]
+    fn computes_deterministic_request_signature() {
+        let token_hash = hash_token("mizan_sk_daemon_abc");
+        let signature_one = compute_request_signature(&token_hash, "POST", "/daemon/register", 1712345678, "nonce-1");
+        let signature_two = compute_request_signature(&token_hash, "POST", "/daemon/register", 1712345678, "nonce-1");
+
+        assert_eq!(signature_one, signature_two);
+        assert_ne!(signature_one, compute_request_signature(&token_hash, "GET", "/daemon/register", 1712345678, "nonce-1"));
     }
 
     #[tokio::test]
