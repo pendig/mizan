@@ -13,6 +13,7 @@ mizan-providers = { path = "../mizan-providers" }
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 tokio.workspace = true
 toml = "0.8"
 tracing.workspace = true

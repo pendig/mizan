@@ -3,184 +3,188 @@
 [![CI](https://github.com/pendig/mizan/actions/workflows/ci.yml/badge.svg)](https://github.com/pendig/mizan/actions/workflows/ci.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-Open-source AI gateway for controlled access, usage metering, and internal
-credit accounting.
+Open-source, Rust-based AI gateway for controlled access, usage metering, and internal credit accounting.
 
-Mizan lets an admin expose AI provider connections behind virtual API keys,
-model routes, rate limits, concurrency limits, and ledger-backed credits. The
-first milestone is backend-first: prove the gateway, metering, wallet, and
-runtime limit engine before building a large dashboard.
+Mizan provides a single OpenAI-compatible control surface for internal and team use.
+Admins manage upstream providers and model routes, while users authenticate with
+virtual API keys and consume credits with predictable limits.
 
-## Status
+## Purpose and positioning
 
-Mizan is ready for a backend/API-focused `v0.1.0` release candidate. The
-release surface includes SQLite-first storage, auth and virtual API keys,
-provider/model routing, OpenAI-compatible non-streaming and streaming chat,
-OpenAI-compatible non-streaming responses, usage metering, credit ledger
-updates, Redis runtime limits, request/admin audit log foundations, RTK CLI
-baseline tooling, provider auth-mode metadata, and Prometheus gateway metrics.
+Mizan is not trying to be a generic product SaaS boilerplate.
+It is an **AI gateway + metering + policy layer**.
 
-The long-term contract is:
+- The admin side defines who can access what model and how much it costs.
+- The user side gets simple API-key access with usage visibility.
+- The platform stays in one place for billing, limits, and audit logs.
 
-- Keep API-facing provider output in an OpenAI-compatible shape.
-- Support both `/v1/chat/completions` and `/v1/responses` through the same
-  normalization path.
-- Track provider auth mode (`api_key`, `subscription_cli`, `browser_session`)
-  without changing the client contract.
-- Add non-API provider runtime adapters later without changing the public
-  OpenAI-compatible surface.
+As of **2026-06-17**, this project is in a backend/API-first production-ready
+alpha boundary.
 
-The stable `v0.1.0` boundary is backend/API-first. Non-API runtime adapters for
-subscription CLI or browser-session providers remain follow-up work; their
-registration metadata is already represented so they can be added without
-changing the public OpenAI-compatible client contract.
+## Release boundary (v0.1.0)
 
-## MVP Scope
+Implemented and stable for core API behavior:
 
-- OpenAI-compatible gateway for `/v1/chat/completions`, `/v1/responses`, and
-  `/v1/models`
-- Admin-managed upstream connections for API providers and local/non-API auth
-  mode families
-- User registration, virtual API keys, model access rules, and usage history
-- Credit accounting based on input/output token prices per 1M tokens
-- Redis-backed rate limits, concurrency limits, and short-lived usage counters
-- Durable request, usage, and credit ledger storage
+- SQLite-first storage with PostgreSQL-compatible migration path
+- Admin seed login, user auth, API-key auth
+- Provider connections and model routes
+- OpenAI-compatible `/v1/models`
+- OpenAI-compatible `/v1/chat/completions`
+- OpenAI-compatible non-streaming `/v1/responses`
+- Streaming + non-streaming chat response handling
+- Usage metering and immutable credit ledger
+- Redis-based RPM/TPM/concurrency controls
+- Request/admin audit log foundations
+- Prometheus gateway metrics
+- RTK baseline CLI proxy/filtering module
 
-## Core Scope
+Not yet in this release:
 
-Mizan core manages internal credits, admin grants, user min/max credit policies,
-usage charges, provider routing, and access limits. Credits are an internal
-accounting unit used by the gateway to meter and control usage.
+- Production hardening beyond local smoke checks
+- Non-API runtime adapters (subscription CLI, browser session)
+- Full dashboard UX for admin/user
+- Enterprise RBAC and polished billing-marketplace features
 
-## Current Docs
+See [docs/RELEASE_0_1_0.md](docs/RELEASE_0_1_0.md) for proof and validation.
 
-- [Product Requirements](docs/PRD.md)
-- [Architecture](docs/ARCHITECTURE.md)
-- [Self-Hosted Distributed Proxy](docs/DISTRIBUTED_PROXY.md)
-- [Engineering Principles](docs/ENGINEERING_PRINCIPLES.md)
-- [MVP Roadmap](docs/MVP_ROADMAP.md)
-- [Backend Implementation Plan](docs/BACKEND_IMPLEMENTATION_PLAN.md)
-- [v0.1.0 Release Readiness](docs/RELEASE_0_1_0.md)
-- [Alpha 1 Readiness](docs/ALPHA_1_READINESS.md)
-- [Runtime Limit Testing](docs/LIMIT_TESTING.md)
-- [Alpha Runbook](docs/ALPHA_RUNBOOK.md)
-- [RTK Base Strategy](docs/RTK_BASE_STRATEGY.md)
-- [RTK Baseline Attestation](docs/RTK_BASELINE_ATTESTATION.md)
-- [Research Notes](docs/RESEARCH.md)
-- [Name Options](docs/NAME_OPTIONS.md)
-- [Initial Issue Backlog](docs/ISSUE_BACKLOG.md)
+## What works now (API-first)
 
-## Recommended MVP Stack
+### Admin capabilities
+- Add provider connections and public model routes
+- Configure route-level token prices per 1M input/output tokens
+- Enable and disable keys/providers
+- Grant and adjust user credit balances
+- Read usage and ledger state
 
-Use Rust for the first backend implementation, with RTK as the starting base for
-the CLI proxy and token-saving layer. Do not rebuild command rewriting,
-command-output filtering, or CLI token-saving from scratch. Mizan should wrap,
-adapt, or vendor the RTK layer, then build gateway, metering, wallet, and admin
-APIs around it. Use Redis for fast runtime controls and PostgreSQL for
-source-of-truth records. We run SQLite by default for phase-0/1 and keep
-PostgreSQL in the migration model for future production deployment.
+### User capabilities
+- Register and login
+- Create and revoke virtual keys
+- List available models
+- Use `/v1/chat/completions` and `/v1/responses`
+- Read remaining credits and usage history
 
-Recommended Rust stack:
+### Contract guarantees
+- Normalized OpenAI-compatible API surface
+- Shared normalization path for `/v1/chat/completions` and `/v1/responses`
+- Stable error structure with request metadata
 
-- `tokio` for async runtime
-- `axum` for HTTP APIs and streaming gateway routes
-- `sqlx` for SQLite and PostgreSQL
-- `redis` or `deadpool-redis` for runtime counters and leases
-- `tower` middleware for auth, tracing, timeouts, and limits
-- RTK-derived `mizan-rtk` module for CLI proxying and command-output filtering
+## Why this model (quick view)
 
-## Target Architecture
+Mizan is suitable for teams that want: control, auditability, and predictable
+spend without exposing provider credentials.
+
+It is less suitable if your first need is: full SaaS billing, built-in subscriptions,
+or an enterprise-grade marketplace.
+
+## Roadmap after API alpha
+
+1. Ship minimal admin dashboard
+2. Ship minimal user dashboard
+3. Add richer provider adapters and non-API auth families
+4. Add production deployment hardening and observability improvements
+
+## UI release target
+
+### Planned pages
+- Login / register
+- Admin overview
+- Provider connections
+- Model routes
+- Credits and grants
+- API key management
+- Usage and limits
+
+### UI screenshot placeholders
+
+After release, include screenshots at:
+- `docs/screenshots/admin-dashboard.png`
+- `docs/screenshots/user-dashboard.png`
+- `docs/screenshots/usage-overview.png`
+- `docs/screenshots/provider-routes.png`
+
+## Architecture
 
 ```mermaid
 flowchart LR
-    Client["User app or AI CLI"] --> Gateway["Mizan gateway"]
+    Client["User app or AI CLI"] --> Gateway["Mizan Gateway"]
     Gateway --> Auth["Virtual API key auth"]
     Auth --> Limits["Redis limits"]
     Limits --> Router["Model router"]
-    Router --> Provider["Provider or local model"]
+    Router --> Provider["Provider or local endpoint"]
     Provider --> Meter["Usage meter"]
     Meter --> Wallet["Credit ledger"]
     Wallet --> DB["SQLite (default) / PostgreSQL"]
 ```
 
-## Core Provides
+## Open-source repository readiness
 
-The open-source core should provide:
+Mizan follows common OSS project patterns:
 
-- Provider connection registry
-- Model routing and pricing rules
-- Virtual API keys
-- Usage metering
-- Credit ledger primitives
-- Admin-managed min/max credit policy
-- Manual/admin credit grants and adjustments
-- Admin and user APIs
-- Local/self-hosted deployment
+- Apache-2.0 license with [LICENSE](LICENSE)
+- Code of conduct at [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)
+- Security policy at [SECURITY.md](SECURITY.md)
+- Contribution guide at [CONTRIBUTING.md](CONTRIBUTING.md)
+- Branch-level CI in [.github/workflows/ci.yml](.github/workflows/ci.yml)
+- Issue templates in [.github/ISSUE_TEMPLATE](.github/ISSUE_TEMPLATE)
+- PR template in [.github/PULL_REQUEST_TEMPLATE.md](.github/PULL_REQUEST_TEMPLATE.md)
+- Dependabot in [.github/dependabot.yml](.github/dependabot.yml)
+- Release notes in [CHANGELOG.md](CHANGELOG.md)
 
-## Development
+Recommended repository settings for public OSS quality (manual in GitHub):
+- Require status checks before merging
+- Protect `main` from force pushes
+- Enforce PR template and issue templates
+- Enable Dependabot security alerts
+- Add at least one maintainer approval rule
+- Enable Discussions or a clear support channel
 
-The Rust workspace follows the crate boundaries described in
-[Engineering Principles](docs/ENGINEERING_PRINCIPLES.md) and
-[Backend Implementation Plan](docs/BACKEND_IMPLEMENTATION_PLAN.md).
+Full checklist is in [docs/GITHUB_READINESS.md](docs/GITHUB_READINESS.md).
 
-Install Rust using the pinned toolchain in `rust-toolchain.toml`, then run:
-
-```sh
-cargo fmt --all
-cargo check --workspace
-cargo test --workspace
-```
-
-Environment variables:
-
-- `MIZAN_PROVIDER_SECRET_KEY` (required before creating provider connections, used to encrypt provider API keys at rest)
-- `MIZAN_HTTP_ADDR` (default `0.0.0.0:18180`)
-- `DATABASE_URL`, `MIZAN_DB_MAX_CONNECTIONS`, `MIZAN_RUN_MIGRATIONS` for storage
-- `REDIS_URL`, `MIZAN_LIMIT_RPM`, `MIZAN_LIMIT_TPM`, `MIZAN_LIMIT_CONCURRENCY`,
-  `MIZAN_LIMIT_WINDOW_SECONDS`, and `MIZAN_LIMIT_LEASE_SECONDS` for runtime limits
-- `MIZAN_ADMIN_EMAIL`, `MIZAN_ADMIN_PASSWORD`, `MIZAN_ADMIN_ROLE` for optional bootstrap
-
-Run the API locally:
-
-```sh
-cargo run -p mizan-api
-```
-
-Run the self-hosted distributed proxy daemon:
-
-```sh
-cargo run -p mizan-daemon -- run --config ./mizan-daemon.toml
-```
-
-Minimal `mizan-daemon.toml`:
-
-```toml
-control_plane_url = "http://127.0.0.1:18180"
-daemon_token_path = "/run/secrets/mizan-daemon-token"
-local_provider_url = "http://127.0.0.1:11434/v1"
-# Optional for local providers that require bearer auth.
-# local_provider_api_key = "local-secret"
-provider_family = "openai-compatible"
-advertised_models = ["llama3.1"]
-max_concurrency = 2
-region = "local"
-labels = ["gpu"]
-health_addr = "127.0.0.1:19180"
-heartbeat_interval_seconds = 30
-```
-
-Run API, SQLite-backed storage, and Redis with Docker Compose:
+## Quick start
 
 ```sh
 docker compose up --build
 ```
 
-Run the alpha validation flow with Redis available:
+```sh
+cargo run -p mizan-api
+```
+
+Run smoke checks with Redis available:
 
 ```sh
 MIZAN_REDIS_URL=redis://127.0.0.1:6379 scripts/limit-smoke.sh
 REDIS_URL=redis://127.0.0.1:6379/ scripts/alpha-smoke.sh
 ```
+
+## Documentation
+
+- [Product Requirements](docs/PRD.md)
+- [Architecture](docs/ARCHITECTURE.md)
+- [MVP Roadmap](docs/MVP_ROADMAP.md)
+- [Backend Implementation Plan](docs/BACKEND_IMPLEMENTATION_PLAN.md)
+- [Self-Hosted Distributed Proxy](docs/DISTRIBUTED_PROXY.md)
+- [Alpha Runbook](docs/ALPHA_RUNBOOK.md)
+- [Runtime Limit Testing](docs/LIMIT_TESTING.md)
+- [Release Readiness: v0.1.0](docs/RELEASE_0_1_0.md)
+- [Release Readiness: v0.1.0-alpha.1](docs/ALPHA_1_READINESS.md)
+- [Project Comparison](docs/PROJECT_COMPARISON.md)
+- [Engineering Principles](docs/ENGINEERING_PRINCIPLES.md)
+- [Research Notes](docs/RESEARCH.md)
+
+## Contributing
+
+Mizan is in bootstrap and welcomes focused contributions.
+Follow [CONTRIBUTING.md](CONTRIBUTING.md), then open an issue for non-trivial changes.
+
+## Project comparison
+
+See [docs/PROJECT_COMPARISON.md](docs/PROJECT_COMPARISON.md) for a current
+comparison against [jonradoff/lastsaas](https://github.com/jonradoff/lastsaas),
+[BerriAI/litellm](https://github.com/BerriAI/litellm),
+[maximhq/bifrost](https://github.com/maximhq/bifrost),
+[api7/aisix](https://github.com/api7/aisix), and
+[LiteLLM-Labs/litellm-rust](https://github.com/LiteLLM-Labs/litellm-rust).
 
 ## License
 
@@ -188,10 +192,5 @@ Apache-2.0. See [LICENSE](LICENSE).
 
 ## Security
 
-Do not commit provider credentials, user secrets, or local agent context. See
-[SECURITY.md](SECURITY.md).
-
-## Contributing
-
-Mizan is in bootstrap, so small focused changes are welcome. See
-[CONTRIBUTING.md](CONTRIBUTING.md) and the issue templates before opening a PR.
+Do not commit provider credentials, user secrets, or local agent context.
+See [SECURITY.md](SECURITY.md).

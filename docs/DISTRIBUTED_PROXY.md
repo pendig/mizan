@@ -97,7 +97,9 @@ Control-plane owned fields:
 - requesting user id and virtual API key id;
 - route id, public model alias, and pricing rule;
 - request id, trace id, timeout, and dispatch id;
-- credit ledger writes and final charge status.
+- credit ledger writes and final charge status;
+- request-log metadata (status, latency, node id, route/provider alias),
+  but not raw conversation payload by default.
 
 Daemon-owned fields:
 
@@ -113,8 +115,12 @@ Shared fields:
 - provider model name used for execution.
 
 No user API key, provider API key, daemon token, or raw secret should be written
-to logs or returned by API endpoints. Logs should include request ids, node ids,
-route ids, model names, status, and latency instead.
+to logs or returned by API endpoints. By default, request logs persist request
+metadata only (`request_id`, route/provider, node IDs, status, and latency) and do
+not persist raw prompt/conversation payloads.
+
+To log complete raw bodies for debugging you can opt in per-process via
+`MIZAN_LOG_RAW_REQUEST_BODIES=true`. That is disabled by default.
 
 ## v0.2.0 Provider Scope
 
