@@ -7,6 +7,7 @@ import {
   useListProviderConnectionsQuery,
   useListModelRoutesQuery,
 } from '@/features/api/mizanApi';
+import { extractApiErrorMessage } from '@/utils/errorHandling';
 
 export function AdminProvidersPage() {
   const { data, isLoading, isError, refetch } = useListProviderConnectionsQuery();
@@ -17,6 +18,7 @@ export function AdminProvidersPage() {
   const [name, setName] = useState('OpenAI Prod');
   const [providerType, setProviderType] = useState('openai');
   const [baseUrl, setBaseUrl] = useState('https://api.openai.com/v1');
+  const [deletingProviderId, setDeletingProviderId] = useState<string | null>(null);
   const providers = data?.data ?? [];
   const routeByProvider = useMemo(() => {
     const counts = new Map<string, number>();
@@ -99,13 +101,14 @@ export function AdminProvidersPage() {
           isEmpty={!isLoading && !isError && providers.length === 0}
           isEmptyText="Belum ada provider."
         />
-        {createError ? <ErrorText>{extractErrorMessage(createError)}</ErrorText> : null}
+        {createError ? <ErrorText>{extractApiErrorMessage(createError, 'Gagal menyimpan provider.')}</ErrorText> : null}
 
         {!isLoading && !isError && providers.length > 0 ? (
           <ul className="space-y-2">
             {providers.map((provider) => {
               const routes = routeByProvider.get(provider.id) ?? 0;
               const providerHealth = provider.enabled ? (routes > 0 ? 'healthy' : 'idle') : 'disabled';
+              const isDeleting = deletingProviderId === provider.id;
               return (
                 <li key={provider.id} className="rounded-lg border border-shell-border p-3">
                   <div className="flex items-center justify-between gap-2">
@@ -135,11 +138,22 @@ export function AdminProvidersPage() {
                   </p>
                   <div className="mt-2">
                     <button
-                      onClick={() => deleteProvider(provider.id)}
+                      onClick={async () => {
+                        if (deletingProviderId) {
+                          return;
+                        }
+                        setDeletingProviderId(provider.id);
+                        try {
+                          await deleteProvider(provider.id).unwrap();
+                        } finally {
+                          setDeletingProviderId(null);
+                        }
+                      }}
                       type="button"
-                      className="rounded-lg border border-rose-500/60 px-2 py-1 text-sm text-rose-300"
+                      disabled={isDeleting}
+                      className="rounded-lg border border-rose-500/60 px-2 py-1 text-sm text-rose-300 disabled:cursor-not-allowed disabled:opacity-40"
                     >
-                      Hapus
+                      {isDeleting ? 'Menghapus...' : 'Hapus'}
                     </button>
                   </div>
                 </li>
@@ -154,22 +168,4 @@ export function AdminProvidersPage() {
 
 function providerTypeLabel(input: string) {
   return input.trim().length > 0 ? input.trim() : 'unknown';
-}
-
-function extractErrorMessage(error: unknown) {
-  if (typeof error === 'string') {
-    return error;
-  }
-  if (error && typeof error === 'object' && 'data' in error) {
-    const maybeData = (error as { data?: unknown }).data;
-    if (maybeData && typeof maybeData === 'object') {
-      const message =
-        (maybeData as { error?: string; message?: string }).error ??
-        (maybeData as { message?: string }).message;
-      if (typeof message === 'string') {
-        return message;
-      }
-    }
-  }
-  return 'Gagal menyimpan provider.';
 }

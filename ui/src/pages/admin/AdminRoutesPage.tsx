@@ -6,6 +6,7 @@ import {
   useListModelRoutesQuery,
   useListProviderConnectionsQuery,
 } from '@/features/api/mizanApi';
+import { extractApiErrorMessage } from '@/utils/errorHandling';
 
 export function AdminRoutesPage() {
   const { data: routesData, isLoading: routeLoading, isError: routeError, refetch: refetchRoutes } =
@@ -84,7 +85,7 @@ export function AdminRoutesPage() {
             placeholder="Upstream model"
           />
         </div>
-        {createError ? <ErrorText>{extractErrorMessage(createError)}</ErrorText> : null}
+        {createError ? <ErrorText>{extractApiErrorMessage(createError, 'Gagal membuat route.')}</ErrorText> : null}
       </DataCard>
 
       <DataCard title="Model routes">
@@ -133,22 +134,4 @@ export function AdminRoutesPage() {
       </DataCard>
     </div>
   );
-}
-
-function extractErrorMessage(error: unknown) {
-  if (typeof error === 'string') {
-    return error;
-  }
-
-  if (error && typeof error === 'object' && 'data' in error) {
-    const maybeData = (error as { data?: unknown }).data;
-    if (maybeData && typeof maybeData === 'object') {
-      const message = (maybeData as { error?: string; message?: string }).error ?? (maybeData as { message?: string }).message;
-      if (typeof message === 'string') {
-        return message;
-      }
-    }
-  }
-
-  return 'Gagal membuat route.';
 }

@@ -5,6 +5,7 @@ import {
   useListDaemonNodesQuery,
   useRevokeDaemonNodeMutation,
 } from '@/features/api/mizanApi';
+import { extractApiErrorMessage } from '@/utils/errorHandling';
 
 export function AdminDaemonNodesPage() {
   const {
@@ -33,6 +34,7 @@ export function AdminDaemonNodesPage() {
             type="button"
             onClick={async () => {
               try {
+                setCreatedNodeToken(null);
                 const response = await createNode({
                   label: label.trim() || undefined,
                   hostname: hostname.trim() || undefined,
@@ -81,7 +83,7 @@ export function AdminDaemonNodesPage() {
             placeholder="Public key (opsional)"
           />
         </div>
-        {createError ? <ErrorText>{extractErrorMessage(createError)}</ErrorText> : null}
+        {createError ? <ErrorText>{extractApiErrorMessage(createError, 'Gagal menyimpan node.')}</ErrorText> : null}
         {createdNodeToken ? (
           <div className="mt-3 rounded-lg border border-emerald-400/40 bg-emerald-950/30 p-3 text-xs break-all">
             <p className="mb-1 font-semibold text-emerald-300">Token node (sekali muncul):</p>
@@ -163,22 +165,4 @@ export function AdminDaemonNodesPage() {
       </DataCard>
     </div>
   );
-}
-
-function extractErrorMessage(error: unknown) {
-  if (typeof error === 'string') {
-    return error;
-  }
-  if (error && typeof error === 'object' && 'data' in error) {
-    const maybeData = (error as { data?: unknown }).data;
-    if (maybeData && typeof maybeData === 'object') {
-      const message =
-        (maybeData as { error?: string; message?: string }).error ??
-        (maybeData as { message?: string }).message;
-      if (typeof message === 'string') {
-        return message;
-      }
-    }
-  }
-  return 'Gagal menyimpan node.';
 }

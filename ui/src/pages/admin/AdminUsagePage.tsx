@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react';
 import { useGrantCreditsMutation, useListAdminUsageQuery } from '@/features/api/mizanApi';
 import { DataCard, ErrorText, QueryState } from '@/components/DataRow';
+import { extractApiErrorMessage } from '@/utils/errorHandling';
 
 type GrantResult = {
   user_id: string;
@@ -23,11 +24,12 @@ export function AdminUsagePage() {
   const [grantReason, setGrantReason] = useState('manual_adjustment');
   const [grantError, setGrantError] = useState<string | null>(null);
   const [grantResult, setGrantResult] = useState<GrantResult | null>(null);
+  const [appliedFilters, setAppliedFilters] = useState(filters);
 
   const [grantCredits, { isLoading: granting }] = useGrantCreditsMutation();
 
-  const parsedLimit = parsePositiveInt(filters.limit);
-  const parsedOffset = parsePositiveInt(filters.offset);
+  const parsedLimit = parsePositiveInt(appliedFilters.limit);
+  const parsedOffset = parsePositiveInt(appliedFilters.offset);
   const parsedGrantAmount = Number.parseInt(grantAmount, 10);
 
   const {
@@ -37,11 +39,11 @@ export function AdminUsagePage() {
     isFetching,
     refetch,
   } = useListAdminUsageQuery({
-    userId: filters.userId || undefined,
-    daemonNodeId: filters.daemonNodeId || undefined,
-    hostUserId: filters.hostUserId || undefined,
-    createdAfter: filters.createdAfter || undefined,
-    createdBefore: filters.createdBefore || undefined,
+    userId: appliedFilters.userId || undefined,
+    daemonNodeId: appliedFilters.daemonNodeId || undefined,
+    hostUserId: appliedFilters.hostUserId || undefined,
+    createdAfter: appliedFilters.createdAfter || undefined,
+    createdBefore: appliedFilters.createdBefore || undefined,
     limit: parsedLimit,
     offset: parsedOffset,
   });
@@ -83,7 +85,7 @@ export function AdminUsagePage() {
               });
             } catch (error) {
               setGrantResult(null);
-              setGrantError(extractErrorMessage(error));
+              setGrantError(extractApiErrorMessage(error, 'Gagal menambah kredit.'));
             }
           }}
         >
@@ -159,9 +161,12 @@ export function AdminUsagePage() {
           <button
             type="button"
             className="rounded-lg border border-shell-border px-2 py-1 text-xs"
-            onClick={() => refetch()}
+            onClick={() => {
+              setAppliedFilters(filters);
+              void refetch();
+            }}
           >
-            Refresh
+            Terapkan
           </button>
         </div>
 
@@ -215,24 +220,4 @@ function parsePositiveInt(raw: string) {
     return undefined;
   }
   return parsed;
-}
-
-function extractErrorMessage(error: unknown) {
-  if (typeof error === 'string') {
-    return error;
-  }
-
-  if (error && typeof error === 'object' && 'data' in error) {
-    const maybeData = (error as { data?: unknown }).data;
-    if (maybeData && typeof maybeData === 'object') {
-      const message =
-        (maybeData as { error?: string; message?: string }).error ??
-        (maybeData as { message?: string }).message;
-      if (typeof message === 'string') {
-        return message;
-      }
-    }
-  }
-
-  return 'Gagal menambah kredit.';
 }

@@ -1,12 +1,14 @@
 import { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useRegisterMutation } from '@/features/api/mizanApi';
-import { DataCard } from '@/components/DataRow';
+import { DataCard, ErrorText } from '@/components/DataRow';
+import { extractApiErrorMessage } from '@/utils/errorHandling';
 
 export function RegisterPage() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [register, { isLoading }] = useRegisterMutation();
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const navigate = useNavigate();
 
   return (
@@ -16,8 +18,13 @@ export function RegisterPage() {
           className="grid gap-3"
           onSubmit={async (event) => {
             event.preventDefault();
-            await register({ email: email.trim(), password }).unwrap();
-            navigate('/login');
+            setErrorMessage(null);
+            try {
+              await register({ email: email.trim(), password }).unwrap();
+              navigate('/login');
+            } catch (error) {
+              setErrorMessage(extractApiErrorMessage(error, 'Registrasi gagal.'));
+            }
           }}
         >
           <label className="grid gap-1 text-sm">
@@ -47,6 +54,7 @@ export function RegisterPage() {
           >
             {isLoading ? 'Mendaftar...' : 'Register'}
           </button>
+          {errorMessage ? <ErrorText>{errorMessage}</ErrorText> : null}
         </form>
       </DataCard>
       <p className="text-xs text-slate-400">

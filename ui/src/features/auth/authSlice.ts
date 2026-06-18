@@ -10,14 +10,29 @@ interface AuthState {
 }
 
 const STORAGE_KEY = 'mizan_access_token';
+const ROLE_STORAGE_KEY = 'mizan_user_role';
+const USER_ID_STORAGE_KEY = 'mizan_user_id';
+const EXPIRES_AT_STORAGE_KEY = 'mizan_token_expires_at';
+
+const clearStoredSession = () => {
+  localStorage.removeItem(STORAGE_KEY);
+  localStorage.removeItem(ROLE_STORAGE_KEY);
+  localStorage.removeItem(USER_ID_STORAGE_KEY);
+  localStorage.removeItem(EXPIRES_AT_STORAGE_KEY);
+};
 
 const parseInitial = (): AuthState => {
   const token = localStorage.getItem(STORAGE_KEY);
-  const role = localStorage.getItem('mizan_user_role');
-  const userId = localStorage.getItem('mizan_user_id');
-  const expiresAt = localStorage.getItem('mizan_token_expires_at');
+  const role = localStorage.getItem(ROLE_STORAGE_KEY);
+  const userId = localStorage.getItem(USER_ID_STORAGE_KEY);
+  const expiresAt = localStorage.getItem(EXPIRES_AT_STORAGE_KEY);
 
   if (!token) {
+    return { token: null, role: null, userId: null, expiresAt: null };
+  }
+
+  if (expiresAt && Date.parse(expiresAt) <= Date.now()) {
+    clearStoredSession();
     return { token: null, role: null, userId: null, expiresAt: null };
   }
 
@@ -44,13 +59,13 @@ const authSlice = createSlice({
       if (action.payload.token) {
         localStorage.setItem(STORAGE_KEY, action.payload.token);
         if (action.payload.role) {
-          localStorage.setItem('mizan_user_role', action.payload.role);
+          localStorage.setItem(ROLE_STORAGE_KEY, action.payload.role);
         }
         if (action.payload.userId) {
-          localStorage.setItem('mizan_user_id', action.payload.userId);
+          localStorage.setItem(USER_ID_STORAGE_KEY, action.payload.userId);
         }
         if (action.payload.expiresAt) {
-          localStorage.setItem('mizan_token_expires_at', action.payload.expiresAt);
+          localStorage.setItem(EXPIRES_AT_STORAGE_KEY, action.payload.expiresAt);
         }
       }
     },
@@ -59,10 +74,7 @@ const authSlice = createSlice({
       state.role = null;
       state.userId = null;
       state.expiresAt = null;
-      localStorage.removeItem(STORAGE_KEY);
-      localStorage.removeItem('mizan_user_role');
-      localStorage.removeItem('mizan_user_id');
-      localStorage.removeItem('mizan_token_expires_at');
+      clearStoredSession();
     },
   },
 });

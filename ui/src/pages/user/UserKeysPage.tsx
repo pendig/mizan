@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { DataCard, EmptyState } from '@/components/DataRow';
 import { useCreateApiKeyMutation, useListApiKeysQuery, useRevokeApiKeyMutation } from '@/features/api/mizanApi';
+import type { ApiKeyCreateResponse } from '@/app/types';
 
 export function UserKeysPage() {
   const { data, isLoading } = useListApiKeysQuery();
@@ -8,6 +9,7 @@ export function UserKeysPage() {
   const [revokeApiKey] = useRevokeApiKeyMutation();
 
   const [label, setLabel] = useState('');
+  const [createdKey, setCreatedKey] = useState<ApiKeyCreateResponse | null>(null);
 
   return (
     <div className="grid gap-4">
@@ -16,11 +18,16 @@ export function UserKeysPage() {
         action={
           <button
             type="button"
-            onClick={() => createApiKey({ label: label.trim() ? label : undefined })}
+            onClick={async () => {
+              setCreatedKey(null);
+              const response = await createApiKey({ label: label.trim() ? label.trim() : undefined }).unwrap();
+              setCreatedKey(response);
+              setLabel('');
+            }}
             disabled={isSaving}
             className="rounded-lg border border-shell-border px-3 py-2"
           >
-            Buat
+            {isSaving ? 'Membuat...' : 'Buat'}
           </button>
         }
       >
@@ -30,6 +37,21 @@ export function UserKeysPage() {
           className="w-full rounded-lg border border-shell-border bg-black/20 px-3 py-2"
           placeholder="Label key (opsional)"
         />
+        {createdKey ? (
+          <div className="mt-3 rounded-lg border border-emerald-400/40 bg-emerald-950/30 p-3 text-xs break-all">
+            <p className="mb-1 font-semibold text-emerald-300">API key baru (sekali muncul):</p>
+            <p className="font-mono">{createdKey.key}</p>
+            <button
+              type="button"
+              onClick={() => {
+                void navigator.clipboard.writeText(createdKey.key);
+              }}
+              className="mt-2 rounded-lg border border-emerald-200/40 px-2 py-1 text-xs"
+            >
+              Salin key
+            </button>
+          </div>
+        ) : null}
       </DataCard>
 
       <DataCard title="API keys">
