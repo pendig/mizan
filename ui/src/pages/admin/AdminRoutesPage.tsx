@@ -21,11 +21,21 @@ export function AdminRoutesPage() {
   const [providerConnectionId, setProviderConnectionId] = useState('');
   const [publicModel, setPublicModel] = useState('mizan/smart');
   const [upstreamModel, setUpstreamModel] = useState('gpt-4o-mini');
+  const [inputPrice, setInputPrice] = useState('250');
+  const [outputPrice, setOutputPrice] = useState('1000');
 
   const [createRoute, { isLoading: creating, error: createError }] = useCreateModelRouteMutation();
   const [deleteRoute] = useDeleteModelRouteMutation();
 
   const providerOptions = useMemo(() => providerData?.data ?? [], [providerData]);
+  const parsedInputPrice = parseNonNegativeInt(inputPrice);
+  const parsedOutputPrice = parseNonNegativeInt(outputPrice);
+  const canCreateRoute =
+    Boolean(providerConnectionId) &&
+    publicModel.trim().length > 0 &&
+    upstreamModel.trim().length > 0 &&
+    parsedInputPrice !== undefined &&
+    parsedOutputPrice !== undefined;
 
   useEffect(() => {
     if (!providerConnectionId && providerOptions.length > 0) {
@@ -41,25 +51,25 @@ export function AdminRoutesPage() {
           <button
             type="button"
             onClick={() => {
-              if (!providerConnectionId || creating || providerLoading) {
+              if (!canCreateRoute || creating || providerLoading) {
                 return;
               }
               createRoute({
                 provider_connection_id: providerConnectionId,
                 public_model: publicModel.trim(),
                 upstream_model: upstreamModel.trim(),
-                pricing_input_per_1m_tokens: 250,
-                pricing_output_per_1m_tokens: 1000,
+                pricing_input_per_1m_tokens: parsedInputPrice,
+                pricing_output_per_1m_tokens: parsedOutputPrice,
               });
             }}
-            disabled={creating || providerLoading || !providerConnectionId}
+            disabled={creating || providerLoading || !canCreateRoute}
             className="rounded-lg border border-shell-border px-3 py-2"
           >
             {creating ? 'Menyimpan...' : 'Simpan'}
           </button>
         }
       >
-        <div className="grid gap-2 sm:grid-cols-3">
+        <div className="grid gap-2 sm:grid-cols-5">
           <select
             value={providerConnectionId}
             onChange={(event) => setProviderConnectionId(event.target.value)}
@@ -83,6 +93,20 @@ export function AdminRoutesPage() {
             onChange={(event) => setUpstreamModel(event.target.value)}
             className="rounded-lg border border-shell-border bg-black/20 px-3 py-2"
             placeholder="Upstream model"
+          />
+          <input
+            value={inputPrice}
+            onChange={(event) => setInputPrice(event.target.value)}
+            className="rounded-lg border border-shell-border bg-black/20 px-3 py-2"
+            placeholder="Input / 1M"
+            inputMode="numeric"
+          />
+          <input
+            value={outputPrice}
+            onChange={(event) => setOutputPrice(event.target.value)}
+            className="rounded-lg border border-shell-border bg-black/20 px-3 py-2"
+            placeholder="Output / 1M"
+            inputMode="numeric"
           />
         </div>
         {createError ? <ErrorText>{extractApiErrorMessage(createError, 'Gagal membuat route.')}</ErrorText> : null}
@@ -134,4 +158,12 @@ export function AdminRoutesPage() {
       </DataCard>
     </div>
   );
+}
+
+function parseNonNegativeInt(raw: string) {
+  const parsed = Number.parseInt(raw, 10);
+  if (Number.isNaN(parsed) || parsed < 0) {
+    return undefined;
+  }
+  return parsed;
 }

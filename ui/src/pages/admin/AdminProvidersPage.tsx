@@ -13,7 +13,7 @@ export function AdminProvidersPage() {
   const { data, isLoading, isError, refetch } = useListProviderConnectionsQuery();
   const [createProvider, { isLoading: creating, error: createError }] = useCreateProviderConnectionMutation();
   const { data: routeData } = useListModelRoutesQuery();
-  const [deleteProvider] = useDeleteProviderConnectionMutation();
+  const [deleteProvider, { error: deleteError }] = useDeleteProviderConnectionMutation();
 
   const [name, setName] = useState('OpenAI Prod');
   const [providerType, setProviderType] = useState('openai');
@@ -102,6 +102,7 @@ export function AdminProvidersPage() {
           isEmptyText="Belum ada provider."
         />
         {createError ? <ErrorText>{extractApiErrorMessage(createError, 'Gagal menyimpan provider.')}</ErrorText> : null}
+        {deleteError ? <ErrorText>{extractApiErrorMessage(deleteError, 'Gagal menghapus provider.')}</ErrorText> : null}
 
         {!isLoading && !isError && providers.length > 0 ? (
           <ul className="space-y-2">
